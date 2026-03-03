@@ -1,0 +1,190 @@
+---
+title: Character-level training
+description: Train a character-level GPT on Shakespeare in minutes
+---
+
+The fastest way to get started with nanoGPT is to train a character-level model on the works of Shakespeare. This small-scale training run completes in about 3 minutes on a GPU.
+
+## Prepare the dataset
+
+First, download and tokenize the Shakespeare dataset:
+
+```bash
+python data/shakespeare_char/prepare.py
+```
+
+This creates `train.bin` and `val.bin` files containing the character-level tokenized text.
+
+## Training configurations
+
+<Tabs>
+  <Tab title="GPU training">
+    Train a baby GPT using the default configuration:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py
+    ```
+
+    ### Model architecture
+
+    The configuration in `config/train_shakespeare_char.py` defines a small Transformer:
+
+    ```python
+    # Model parameters
+    n_layer = 6
+    n_head = 6
+    n_embd = 384
+    dropout = 0.2
+
+    # Training parameters
+    batch_size = 64
+    block_size = 256  # context of up to 256 previous characters
+    learning_rate = 1e-3
+    max_iters = 5000
+    ```
+
+    <Note>
+      This configuration trains a 6-layer Transformer with 6 attention heads and 384 feature channels.
+    </Note>
+
+    ### Expected results
+
+    - **Training time**: ~3 minutes on A100 GPU
+    - **Best validation loss**: 1.4697
+    - **Output directory**: `out-shakespeare-char`
+
+  </Tab>
+  <Tab title="CPU training">
+    If you don't have a GPU, you can still train on CPU with reduced parameters:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --device=cpu \
+      --compile=False \
+      --eval_iters=20 \
+      --log_interval=1 \
+      --block_size=64 \
+      --batch_size=12 \
+      --n_layer=4 \
+      --n_head=4 \
+      --n_embd=128 \
+      --max_iters=2000 \
+      --lr_decay_iters=2000 \
+      --dropout=0.0
+    ```
+
+    ### Parameter adjustments
+
+    - Set `--device=cpu` and `--compile=False` (PyTorch 2.0 compile not supported on CPU)
+    - Reduce context size to 64 characters (`--block_size=64`)
+    - Use smaller batch size of 12 (`--batch_size=12`)
+    - Smaller model: 4 layers, 4 heads, 128 embedding size
+    - Shorter training: 2000 iterations
+    - No dropout for small networks (`--dropout=0.0`)
+
+    ### Expected results
+
+    - **Training time**: ~3 minutes on CPU
+    - **Validation loss**: ~1.88 (higher than GPU version)
+
+  </Tab>
+  <Tab title="Apple Silicon">
+    On Apple Silicon Macbooks with recent PyTorch versions, use Metal Performance Shaders:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --device=mps
+    ```
+
+    <Note>
+      The `--device=mps` flag uses the on-chip GPU and can significantly accelerate training (2-3x speedup).
+    </Note>
+
+  </Tab>
+</Tabs>
+
+## Configuration parameters
+
+Key parameters from `config/train_shakespeare_char.py`:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `out_dir` | `'out-shakespeare-char'` | Checkpoint directory |
+| `eval_interval` | 250 | Steps between evaluations |
+| `eval_iters` | 200 | Batches to use for evaluation |
+| `gradient_accumulation_steps` | 1 | No gradient accumulation |
+| `batch_size` | 64 | Batch size per iteration |
+| `block_size` | 256 | Context length in characters |
+| `learning_rate` | 1e-3 | Higher LR for baby networks |
+| `max_iters` | 5000 | Total training iterations |
+| `warmup_iters` | 100 | Linear warmup steps |
+| `beta2` | 0.99 | Adam beta2 (higher due to small batch) |
+
+## Sample from the model
+
+After training completes, generate text samples:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+### Example output
+
+After 3 minutes of training on GPU:
+
+```
+ANGELO:
+And cowards it be strawn to my bed,
+And thrust the gates of my threats,
+Because he that ale away, and hang'd
+An one with him.
+
+DUKE VINCENTIO:
+I thank your eyes against it.
+
+DUKE VINCENTIO:
+Then will answer him to save the malm:
+And what have you tyrannous shall do this?
+```
+
+<Warning>
+  Character-level models produce lower quality text than BPE-tokenized models. For better results, consider [finetuning](/training/finetuning) a pretrained GPT-2 model on this dataset.
+</Warning>
+
+## Advanced configuration
+
+<Steps>
+  <Step title="Adjust model size">
+    Modify `n_layer`, `n_head`, and `n_embd` in the config file or via command line:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --n_layer=8 --n_embd=512
+    ```
+  </Step>
+
+  <Step title="Extend training">
+    Increase `max_iters` and `lr_decay_iters` for longer training:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --max_iters=10000 --lr_decay_iters=10000
+    ```
+  </Step>
+
+  <Step title="Enable logging">
+    Track training progress with Weights & Biases:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --wandb_log=True
+    ```
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Reproduce GPT-2" icon="rocket" href="/training/reproducing-gpt2">
+    Train a 124M parameter model on OpenWebText
+  </Card>
+  <Card title="Finetuning" icon="wrench" href="/training/finetuning">
+    Finetune pretrained GPT-2 models on custom data
+  </Card>
+</CardGroup>

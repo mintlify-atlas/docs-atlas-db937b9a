@@ -1,0 +1,402 @@
+---
+title: Model parameters
+description: Complete reference for GPT model architecture configuration parameters
+---
+
+## Overview
+
+The GPT model architecture is defined by the `GPTConfig` dataclass in `model.py:108-116`. These parameters control the transformer's structure and capacity.
+
+<Note>
+Model parameters can be set via the same configuration system as training parameters. See the [configuration overview](/configuration/overview) for details.
+</Note>
+
+## GPTConfig parameters
+
+These parameters define the model architecture. Changes require retraining from scratch (unless loading pretrained weights).
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks (layers) in the model. Each block contains one attention layer and one feedforward layer.
+  
+  **Impact**: Controls model depth. More layers = more capacity but slower training.
+  
+  **GPT-2 variants**:
+  - GPT-2 base: 12 layers (124M params)
+  - GPT-2 medium: 24 layers (350M params)
+  - GPT-2 large: 36 layers (774M params)
+  - GPT-2 XL: 48 layers (1.5B params)
+  
+  ```python
+  n_layer = 6  # Baby GPT for debugging
+  ```
+  
+  <Tip>
+  Start with 6-12 layers for small datasets or experimentation.
+  </Tip>
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads in each multi-head attention layer.
+  
+  **Constraint**: Must divide `n_embd` evenly. Each head has dimension `n_embd / n_head`.
+  
+  **Impact**: More heads allow attending to different positions simultaneously. Typical head dimension is 64.
+  
+  **GPT-2 variants**:
+  - GPT-2 base: 12 heads
+  - GPT-2 medium: 16 heads
+  - GPT-2 large: 20 heads
+  - GPT-2 XL: 25 heads
+  
+  ```python
+  n_head = 6   # For n_embd=384 (384/6 = 64 dim per head)
+  n_head = 12  # For n_embd=768 (768/12 = 64 dim per head)
+  ```
+  
+  <Warning>
+  The assertion `assert config.n_embd % config.n_head == 0` in `model.py:33` will fail if `n_embd` is not divisible by `n_head`.
+  </Warning>
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension (model width). This is the size of the hidden states throughout the model.
+  
+  **Impact**: Controls model width. Larger values = more capacity and memory usage.
+  
+  **GPT-2 variants**:
+  - GPT-2 base: 768
+  - GPT-2 medium: 1024
+  - GPT-2 large: 1280
+  - GPT-2 XL: 1600
+  
+  ```python
+  n_embd = 384  # Small model
+  n_embd = 768  # GPT-2 base size
+  ```
+  
+  <Note>
+  The feedforward layer expands to `4 * n_embd` internally (see `model.py:82`).
+  </Note>
+</ParamField>
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length (context window) the model can process. This is the size of the positional embedding table.
+  
+  **Impact**: Determines maximum context length. Larger values allow longer sequences but increase memory quadratically for attention.
+  
+  ```python
+  block_size = 256   # Short context for speed
+  block_size = 1024  # GPT-2 standard
+  block_size = 2048  # Extended context
+  ```
+  
+  <Warning>
+  You can train with `block_size=256` and later use model surgery (`crop_block_size()`) to reduce it, but you cannot increase it without retraining.
+  </Warning>
+</ParamField>
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Size of the vocabulary (number of unique tokens). This determines the size of token embedding and output layers.
+  
+  **Default explained**: GPT-2 uses 50257 tokens, padded to 50304 (nearest multiple of 64) for computational efficiency.
+  
+  ```python
+  vocab_size = 50304  # GPT-2 tokenizer (padded)
+  vocab_size = 50257  # GPT-2 tokenizer (exact)
+  vocab_size = 65      # Character-level (ASCII + special)
+  ```
+  
+  <Note>
+  The training script automatically detects `vocab_size` from `data/{dataset}/meta.pkl` if available (`train.py:138-144`).
+  </Note>
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability applied throughout the model:
+  - Attention dropout (`model.py:39`)
+  - Residual dropout after attention (`model.py:40`)
+  - MLP dropout (`model.py:85`)
+  - Embedding dropout (`model.py:129`)
+  
+  **Recommendations**:
+  - **Pretraining**: Use `0.0` (no dropout)
+  - **Finetuning**: Use `0.1` to `0.2` to prevent overfitting on small datasets
+  
+  ```python
+  dropout = 0.0  # Pretraining on large datasets
+  dropout = 0.1  # Finetuning on small datasets
+  dropout = 0.2  # Heavy regularization
+  ```
+</ParamField>
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to include bias terms in Linear layers and LayerNorm.
+  
+  **Impact**:
+  - `True`: Compatible with OpenAI GPT-2 checkpoints, standard practice
+  - `False`: Slightly faster and often performs better (modern recommendation)
+  
+  ```python
+  bias = True   # Required for init_from='gpt2*'
+  bias = False  # Better for training from scratch
+  ```
+  
+  <Tip>
+  When loading pretrained GPT-2 weights, `bias` is forced to `True` (`model.py:225`).
+  </Tip>
+</ParamField>
+
+## Architecture details
+
+### Model structure
+
+The GPT model (`model.py:118-331`) consists of:
+
+```
+GPT
+├── transformer
+│   ├── wte: Embedding(vocab_size, n_embd)      # Token embeddings
+│   ├── wpe: Embedding(block_size, n_embd)      # Position embeddings
+│   ├── drop: Dropout(dropout)                   # Embedding dropout
+│   ├── h: ModuleList[Block] × n_layer          # Transformer blocks
+│   └── ln_f: LayerNorm(n_embd)                 # Final layer norm
+└── lm_head: Linear(n_embd, vocab_size)         # Output projection
+```
+
+Each `Block` contains:
+
+```
+Block
+├── ln_1: LayerNorm(n_embd)
+├── attn: CausalSelfAttention
+│   ├── c_attn: Linear(n_embd, 3*n_embd)        # Q, K, V projections
+│   ├── c_proj: Linear(n_embd, n_embd)          # Output projection
+│   ├── attn_dropout: Dropout(dropout)
+│   └── resid_dropout: Dropout(dropout)
+├── ln_2: LayerNorm(n_embd)
+└── mlp: MLP
+    ├── c_fc: Linear(n_embd, 4*n_embd)          # Expand
+    ├── gelu: GELU()
+    ├── c_proj: Linear(4*n_embd, n_embd)        # Contract
+    └── dropout: Dropout(dropout)
+```
+
+### Parameter count
+
+The number of parameters is approximately:
+
+```python
+params = n_layer * (12 * n_embd^2) + vocab_size * n_embd
+```
+
+For GPT-2 configurations:
+
+| Model | n_layer | n_head | n_embd | Parameters |
+|-------|---------|--------|--------|------------|
+| GPT-2 base | 12 | 12 | 768 | 124M |
+| GPT-2 medium | 24 | 16 | 1024 | 350M |
+| GPT-2 large | 36 | 20 | 1280 | 774M |
+| GPT-2 XL | 48 | 25 | 1600 | 1558M |
+
+<Tip>
+The model prints its parameter count on initialization (`model.py:148`):
+```
+number of parameters: 124.44M
+```
+</Tip>
+
+### Flash Attention
+
+The model automatically uses Flash Attention if available (PyTorch ≥ 2.0):
+
+```python
+self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+```
+
+Flash Attention provides:
+- Faster attention computation
+- Lower memory usage
+- Exact numerical equivalence
+
+<Warning>
+If Flash Attention is not available, you'll see:
+```
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+```
+</Warning>
+
+## Configuration examples
+
+<Tabs>
+  <Tab title="Baby GPT">
+    ```python
+    # Tiny model for debugging (~ 10M params)
+    n_layer = 4
+    n_head = 4
+    n_embd = 256
+    block_size = 256
+    dropout = 0.0
+    bias = False
+    ```
+    
+    **Use case**: Quick experiments, debugging, running on CPU/laptops
+  </Tab>
+  
+  <Tab title="Small GPT">
+    ```python
+    # Small model for limited compute (~ 20M params)
+    n_layer = 6
+    n_head = 6
+    n_embd = 384
+    block_size = 512
+    dropout = 0.0
+    bias = False
+    ```
+    
+    **Use case**: Character-level models, small datasets, single GPU training
+  </Tab>
+  
+  <Tab title="GPT-2 Base">
+    ```python
+    # Standard GPT-2 (124M params)
+    n_layer = 12
+    n_head = 12
+    n_embd = 768
+    block_size = 1024
+    dropout = 0.0
+    bias = False  # True if loading OpenAI weights
+    ```
+    
+    **Use case**: Full-scale pretraining, multi-GPU training, production models
+  </Tab>
+  
+  <Tab title="GPT-2 Medium">
+    ```python
+    # Larger model (350M params)
+    n_layer = 24
+    n_head = 16
+    n_embd = 1024
+    block_size = 1024
+    dropout = 0.0
+    bias = False
+    ```
+    
+    **Use case**: High-performance applications, large datasets, multi-node training
+  </Tab>
+</Tabs>
+
+## Finetuning considerations
+
+When finetuning pretrained models, certain parameters are **fixed** and cannot be changed:
+
+### Fixed parameters (resume/pretrained)
+
+These are locked when using `init_from='resume'` or `init_from='gpt2*'` (`train.py:166-167`):
+
+- `n_layer`
+- `n_head` 
+- `n_embd`
+- `block_size`
+- `bias`
+- `vocab_size`
+
+### Overridable parameters
+
+Only `dropout` can be overridden when loading pretrained weights (`train.py:184`):
+
+```python
+init_from = 'gpt2'
+dropout = 0.1  # Add dropout for finetuning
+```
+
+<Note>
+You can reduce `block_size` via model surgery using `crop_block_size()` (`train.py:190-192`), but not increase it.
+</Note>
+
+## Advanced topics
+
+<AccordionGroup>
+  <Accordion title="Weight tying">
+    The token embedding weights are shared (tied) with the output layer:
+    
+    ```python
+    self.transformer.wte.weight = self.lm_head.weight
+    ```
+    
+    This reduces parameters and often improves performance. See [Weight Tying paper](https://paperswithcode.com/method/weight-tying).
+  </Accordion>
+  
+  <Accordion title="Initialization">
+    Weights are initialized with:
+    - Linear layers: Normal(0, 0.02)
+    - Embeddings: Normal(0, 0.02)  
+    - Residual projections: Normal(0, 0.02/√(2*n_layer))
+    
+    See `model.py:141-145` for the scaled initialization of residual connections.
+  </Accordion>
+  
+  <Accordion title="Head dimension">
+    Each attention head has dimension `n_embd / n_head`. Common choices:
+    
+    | n_embd | n_head | Head dim |
+    |--------|--------|----------|
+    | 256    | 4      | 64       |
+    | 384    | 6      | 64       |
+    | 512    | 8      | 64       |
+    | 768    | 12     | 64       |
+    | 1024   | 16     | 64       |
+    
+    **64 is the most common head dimension** across transformer models.
+  </Accordion>
+  
+  <Accordion title="Memory requirements">
+    Approximate GPU memory for training (batch_size=1, block_size=1024, mixed precision):
+    
+    | Model | Parameters | Training memory |
+    |-------|------------|----------------|
+    | 10M   | 10M        | ~2 GB          |
+    | 124M  | 124M       | ~8 GB          |
+    | 350M  | 350M       | ~16 GB         |
+    | 774M  | 774M       | ~32 GB         |
+    | 1.5B  | 1.5B       | ~48 GB         |
+    
+    Scale proportionally with batch_size and gradient_accumulation_steps.
+  </Accordion>
+  
+  <Accordion title="Model surgery">
+    You can reduce the context window after loading a checkpoint:
+    
+    ```python
+    model = GPT.from_pretrained('gpt2')  # block_size=1024
+    model.crop_block_size(512)            # Reduce to 512
+    ```
+    
+    This truncates positional embeddings and attention bias buffers (`model.py:195-204`).
+  </Accordion>
+</AccordionGroup>
+
+## Validation
+
+The model validates configuration at initialization:
+
+```python
+assert config.vocab_size is not None
+assert config.block_size is not None
+assert config.n_embd % config.n_head == 0  # In CausalSelfAttention
+```
+
+<Warning>
+If you violate these constraints, you'll get assertion errors at model creation time.
+</Warning>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Configuration overview" href="/configuration/overview" icon="book">
+    Learn how to set these parameters via config files
+  </Card>
+  
+  <Card title="Training parameters" href="/configuration/training-params" icon="sliders">
+    Configure optimizer, learning rate, and training loop
+  </Card>
+</CardGroup>

@@ -1,0 +1,414 @@
+---
+title: Finetuning
+description: Finetune pretrained GPT-2 models on custom datasets with minimal compute
+---
+
+Finetuning a pretrained GPT-2 model is identical to training from scratch, except you initialize from a checkpoint and use a smaller learning rate. This allows you to adapt large models to your specific domain with minimal compute.
+
+## Quick start
+
+Finetune GPT-2 XL (1.5B parameters) on Shakespeare in just a few minutes:
+
+<Steps>
+  <Step title="Prepare the dataset">
+    Download and tokenize Shakespeare using GPT-2 BPE:
+
+    ```bash
+    python data/shakespeare/prepare.py
+    ```
+
+    This creates `train.bin` and `val.bin` using the OpenAI BPE tokenizer (unlike character-level encoding).
+  </Step>
+
+  <Step title="Run finetuning">
+    ```bash
+    python train.py config/finetune_shakespeare.py
+    ```
+
+    This loads the pretrained `gpt2-xl` checkpoint and finetunes it on Shakespeare.
+  </Step>
+
+  <Step title="Sample from the model">
+    ```bash
+    python sample.py --out_dir=out-shakespeare
+    ```
+  </Step>
+</Steps>
+
+## Finetuning configuration
+
+The `config/finetune_shakespeare.py` file shows a complete finetuning setup:
+
+```python
+import time
+
+out_dir = 'out-shakespeare'
+eval_interval = 5
+eval_iters = 40
+wandb_log = False
+
+dataset = 'shakespeare'
+init_from = 'gpt2-xl'  # Largest GPT-2 model (1558M params)
+
+# Only save checkpoints if validation loss improves
+always_save_checkpoint = False
+
+# Batch size calculation:
+# 1 batch_size * 32 grad_accum * 1024 tokens = 32,768 tokens/iter
+# Shakespeare has 301,966 tokens, so 1 epoch ~= 9.2 iters
+batch_size = 1
+gradient_accumulation_steps = 32
+max_iters = 20
+
+# Finetune at constant learning rate
+learning_rate = 3e-5
+decay_lr = False
+```
+
+### Key differences from pretraining
+
+| Parameter | Pretraining | Finetuning |
+|-----------|-------------|------------|
+| `init_from` | `'scratch'` | `'gpt2-xl'` |
+| `learning_rate` | `6e-4` | `3e-5` (10-20x lower) |
+| `decay_lr` | `True` | `False` (constant LR) |
+| `max_iters` | 600000 | 20 (much shorter) |
+| `dropout` | `0.0` | `0.1+` (optional regularization) |
+
+## Available pretrained models
+
+You can initialize from any OpenAI GPT-2 checkpoint:
+
+| Model | Parameters | Context Length | Memory (fp16) |
+|-------|-----------|----------------|---------------|
+| `gpt2` | 124M | 1024 | ~500MB |
+| `gpt2-medium` | 350M | 1024 | ~1.5GB |
+| `gpt2-large` | 774M | 1024 | ~3GB |
+| `gpt2-xl` | 1558M | 1024 | ~6GB |
+
+Set the model in your config:
+
+```python
+init_from = 'gpt2-xl'  # or 'gpt2', 'gpt2-medium', 'gpt2-large'
+```
+
+## Initialization logic
+
+From `train.py:181-189`, the script downloads and loads pretrained weights:
+
+```python
+elif init_from.startswith('gpt2'):
+    print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+    
+    # Initialize from OpenAI GPT-2 weights
+    override_args = dict(dropout=dropout)
+    model = GPT.from_pretrained(init_from, override_args)
+    
+    # Read config params for checkpointing
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = getattr(model.config, k)
+```
+
+This automatically downloads weights from Hugging Face on first use.
+
+## Preparing custom datasets
+
+### Using BPE tokenization
+
+For best results, use the same GPT-2 BPE tokenizer as pretraining:
+
+```python
+import tiktoken
+import numpy as np
+
+# Load GPT-2 tokenizer
+enc = tiktoken.get_encoding("gpt2")
+
+# Tokenize your text
+with open('your_data.txt', 'r') as f:
+    text = f.read()
+
+ids = enc.encode_ordinary(text)
+ids.append(enc.eot_token)  # Add end-of-text token
+
+# Save as binary file
+arr = np.array(ids, dtype=np.uint16)
+arr.tofile('train.bin')
+```
+
+### Train/validation split
+
+Create separate files:
+
+```python
+# Split data 90/10
+split_idx = int(len(ids) * 0.9)
+
+train_ids = ids[:split_idx]
+val_ids = ids[split_idx:]
+
+np.array(train_ids, dtype=np.uint16).tofile('train.bin')
+np.array(val_ids, dtype=np.uint16).tofile('val.bin')
+```
+
+### Directory structure
+
+```
+data/
+└── your_dataset/
+    ├── prepare.py       # Tokenization script
+    ├── train.bin        # Training data
+    ├── val.bin          # Validation data
+    └── meta.pkl         # Vocabulary metadata (optional)
+```
+
+## Finetuning hyperparameters
+
+### Learning rate
+
+Use a much lower learning rate than pretraining:
+
+```python
+learning_rate = 3e-5  # Typical range: 1e-5 to 1e-4
+decay_lr = False       # Often use constant LR
+```
+
+<Warning>
+  Too high a learning rate can destroy pretrained knowledge. Start conservatively and increase if training is too slow.
+</Warning>
+
+### Regularization
+
+Add dropout to prevent overfitting on small datasets:
+
+```python
+dropout = 0.1  # 0.1 to 0.2 for finetuning (0.0 for pretraining)
+```
+
+From the override logic:
+
+```python
+override_args = dict(dropout=dropout)
+model = GPT.from_pretrained(init_from, override_args)
+```
+
+### Training duration
+
+Finetuning requires far fewer iterations:
+
+```python
+max_iters = 20  # For tiny datasets like Shakespeare
+# Scale up for larger datasets:
+# - Small dataset (1M tokens): 100-500 iters
+# - Medium dataset (100M tokens): 1000-5000 iters
+# - Large dataset (1B+ tokens): 10000+ iters
+```
+
+### Batch size
+
+Adjust based on dataset size and memory:
+
+```python
+# Small dataset (Shakespeare: 300K tokens)
+batch_size = 1
+gradient_accumulation_steps = 32
+# Effective batch size: 1 * 32 * 1024 = 32,768 tokens
+
+# Larger dataset
+batch_size = 4
+gradient_accumulation_steps = 8
+# Effective batch size: 4 * 8 * 1024 = 32,768 tokens
+```
+
+## Example finetuning output
+
+After finetuning GPT-2 XL on Shakespeare:
+
+```
+THEODORE:
+Thou shalt sell me to the highest bidder: if I die,
+I sell thee to the first; if I go mad,
+I sell thee to the second; if I
+lie, I sell thee to the third; if I slay,
+I sell thee to the fourth: so buy or sell,
+I tell thee again, thou shalt not sell my
+possession.
+
+JULIET:
+And if thou steal, thou shalt not sell thyself.
+
+THEODORE:
+I do not steal; I sell the stolen goods.
+
+THEODORE:
+Thou know'st not what thou sell'st; thou, a woman,
+Thou art ever a victim, a thing of no worth:
+Thou hast no right, no right, but to be sold.
+```
+
+<Note>
+  The model generates coherent Shakespearean-style dialogue with proper formatting and character names after just ~20 iterations.
+</Note>
+
+## Memory management
+
+### Reduce memory usage
+
+If you run out of GPU memory:
+
+<Tabs>
+  <Tab title="Use a smaller model">
+    ```python
+    init_from = 'gpt2'  # 124M params instead of gpt2-xl (1558M)
+    ```
+  </Tab>
+
+  <Tab title="Decrease batch size">
+    ```python
+    batch_size = 1
+    gradient_accumulation_steps = 16  # Reduce from 32
+    ```
+  </Tab>
+
+  <Tab title="Decrease context length">
+    ```python
+    block_size = 512  # Reduce from 1024
+    ```
+
+    This crops the pretrained model's context:
+
+    ```python
+    if block_size < model.config.block_size:
+        model.crop_block_size(block_size)
+        model_args['block_size'] = block_size
+    ```
+  </Tab>
+</Tabs>
+
+## Multi-GPU finetuning
+
+Scale finetuning across multiple GPUs:
+
+```bash
+torchrun --standalone --nproc_per_node=4 train.py config/finetune_shakespeare.py
+```
+
+The same DDP logic applies as in pretraining. See [Distributed Training](/training/distributed-training) for details.
+
+## Resume from checkpoint
+
+Resume finetuning from a saved checkpoint:
+
+```python
+init_from = 'resume'
+out_dir = 'out-shakespeare'  # Directory with ckpt.pt
+```
+
+Run:
+
+```bash
+python train.py config/finetune_shakespeare.py --init_from=resume
+```
+
+From `train.py:158-180`:
+
+```python
+elif init_from == 'resume':
+    print(f"Resuming training from {out_dir}")
+    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    checkpoint_model_args = checkpoint['model_args']
+    
+    # Restore model architecture
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+        model_args[k] = checkpoint_model_args[k]
+    
+    gptconf = GPTConfig(**model_args)
+    model = GPT(gptconf)
+    model.load_state_dict(checkpoint['model'])
+    
+    # Restore training state
+    iter_num = checkpoint['iter_num']
+    best_val_loss = checkpoint['best_val_loss']
+```
+
+## Domain adaptation strategies
+
+### Continue pretraining
+
+For large domain-specific corpora (e.g., medical, legal, code):
+
+```python
+init_from = 'gpt2-xl'
+learning_rate = 1e-4  # Slightly higher than pure finetuning
+max_iters = 10000      # More iterations
+decay_lr = True        # Use learning rate decay
+```
+
+### Task-specific finetuning
+
+For specific tasks (e.g., summarization, Q&A):
+
+```python
+init_from = 'gpt2-xl'
+learning_rate = 3e-5   # Low learning rate
+max_iters = 1000       # Moderate iterations
+dropout = 0.1          # Some regularization
+```
+
+### Few-shot finetuning
+
+For very small datasets (less than 1000 examples):
+
+```python
+init_from = 'gpt2-xl'
+learning_rate = 1e-5   # Very low learning rate
+max_iters = 50         # Few iterations
+dropout = 0.2          # Higher regularization
+always_save_checkpoint = False  # Only save improvements
+```
+
+## Monitoring overfitting
+
+Watch for signs of overfitting:
+
+```
+step 0: train loss 3.2341, val loss 3.2156
+step 5: train loss 0.8765, val loss 1.2341  # Val loss not improving
+step 10: train loss 0.3421, val loss 1.3567  # Val loss increasing
+```
+
+<Warning>
+  If validation loss increases while training loss decreases, you're overfitting. Reduce `max_iters`, increase `dropout`, or use a smaller model.
+</Warning>
+
+## Best practices
+
+<CardGroup cols={2}>
+  <Card title="Start small" icon="seedling">
+    Begin with `gpt2` (124M) to iterate quickly, then scale to larger models
+  </Card>
+  
+  <Card title="Monitor validation loss" icon="chart-line">
+    Only save checkpoints when validation loss improves
+  </Card>
+  
+  <Card title="Use BPE tokenization" icon="list">
+    Match the pretraining tokenizer (GPT-2 BPE) for best results
+  </Card>
+  
+  <Card title="Tune learning rate" icon="sliders">
+    Start at 3e-5, decrease if unstable, increase if too slow
+  </Card>
+</CardGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Sampling" icon="wand-magic-sparkles" href="/usage/sampling">
+    Generate text from your finetuned model
+  </Card>
+  <Card title="Distributed training" icon="network-wired" href="/training/distributed-training">
+    Scale finetuning across multiple GPUs
+  </Card>
+</CardGroup>

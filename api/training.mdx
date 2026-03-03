@@ -1,0 +1,389 @@
+---
+title: Training
+description: Training loop and utilities for GPT models
+---
+
+## Overview
+
+The training module provides a complete implementation for training GPT models with support for:
+- Single GPU and distributed data parallel (DDP) training
+- Mixed precision training (float16/bfloat16)
+- Gradient accumulation
+- Learning rate scheduling with warmup and cosine decay
+- Checkpointing and resumption
+- WandB integration for experiment tracking
+
+## Training modes
+
+You can run the training script in multiple configurations:
+
+<CodeGroup>
+```bash Single GPU
+python train.py --batch_size=32 --compile=False
+```
+
+```bash DDP on 4 GPUs (single node)
+torchrun --standalone --nproc_per_node=4 train.py
+```
+
+```bash DDP on multiple nodes
+# On master node (IP: 123.456.123.456)
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+
+# On worker node
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+```
+</CodeGroup>
+
+<Note>
+  If your cluster does not have Infiniband, prepend `NCCL_IB_DISABLE=1` to the commands.
+</Note>
+
+## Key functions
+
+### get_batch
+
+```python
+get_batch(split)
+```
+
+Loads a batch of training or validation data using memory-mapped files.
+
+<ParamField path="split" type="str" required>
+  Data split to load from: `'train'` or `'val'`
+</ParamField>
+
+**Returns:** Tuple of (x, y)
+- `x`: Input token sequences of shape (batch_size, block_size)
+- `y`: Target token sequences of shape (batch_size, block_size), shifted by one position
+
+<Expandable title="Implementation details">
+  The function:
+  1. Creates a new numpy memmap for each batch to avoid memory leaks
+  2. Randomly samples starting positions from the dataset
+  3. Extracts sequences of length `block_size`
+  4. Creates input (x) and target (y) sequences where y is x shifted by one token
+  5. Pins memory and transfers to GPU asynchronously if using CUDA
+
+  Data is expected to be stored as binary files:
+  - `data/{dataset}/train.bin`
+  - `data/{dataset}/val.bin`
+
+  Each file contains uint16 token indices.
+</Expandable>
+
+### estimate_loss
+
+```python
+@torch.no_grad()
+estimate_loss()
+```
+
+Computes accurate loss estimates over multiple batches for both training and validation splits.
+
+**Returns:** Dictionary with keys `'train'` and `'val'`, each containing the mean loss
+
+<ParamField path="eval_iters" type="int" default="200">
+  Number of iterations to average over (configured globally)
+</ParamField>
+
+<Expandable title="Why multiple batches?">
+  Evaluating on multiple batches provides a more stable and accurate loss estimate compared to a single batch, which can be noisy. The function:
+  1. Sets model to eval mode
+  2. Runs inference on `eval_iters` batches for each split
+  3. Averages the losses
+  4. Returns model to train mode
+
+  This is called periodically during training (every `eval_interval` steps) to monitor progress.
+</Expandable>
+
+### get_lr
+
+```python
+get_lr(it)
+```
+
+Computes the learning rate for a given iteration using cosine decay with linear warmup.
+
+<ParamField path="it" type="int" required>
+  Current iteration number
+</ParamField>
+
+**Returns:** float - Learning rate for this iteration
+
+<Expandable title="Learning rate schedule">
+  The schedule has three phases:
+
+  1. **Linear warmup** (iterations 0 to `warmup_iters`):
+     ```
+     lr = learning_rate * (it + 1) / (warmup_iters + 1)
+     ```
+
+  2. **Cosine decay** (iterations `warmup_iters` to `lr_decay_iters`):
+     ```
+     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+     coeff = 0.5 * (1.0 + cos(π * decay_ratio))
+     lr = min_lr + coeff * (learning_rate - min_lr)
+     ```
+
+  3. **Constant minimum** (iterations > `lr_decay_iters`):
+     ```
+     lr = min_lr
+     ```
+
+  This follows the approach from the Chinchilla paper.
+</Expandable>
+
+## Training loop structure
+
+The main training loop performs the following steps:
+
+### 1. Learning rate scheduling
+
+```python
+lr = get_lr(iter_num) if decay_lr else learning_rate
+for param_group in optimizer.param_groups:
+    param_group['lr'] = lr
+```
+
+### 2. Periodic evaluation
+
+```python
+if iter_num % eval_interval == 0 and master_process:
+    losses = estimate_loss()
+    print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    # Save checkpoint if validation loss improved or always_save_checkpoint=True
+```
+
+### 3. Forward and backward pass
+
+With gradient accumulation to simulate larger batch sizes:
+
+```python
+for micro_step in range(gradient_accumulation_steps):
+    if ddp:
+        # Only sync gradients on the last micro step
+        model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
+    with ctx:  # Automatic mixed precision context
+        logits, loss = model(X, Y)
+        loss = loss / gradient_accumulation_steps
+    # Async prefetch next batch
+    X, Y = get_batch('train')
+    # Backward pass with gradient scaling for fp16
+    scaler.scale(loss).backward()
+```
+
+### 4. Gradient clipping and optimizer step
+
+```python
+if grad_clip != 0.0:
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+scaler.step(optimizer)
+scaler.update()
+optimizer.zero_grad(set_to_none=True)
+```
+
+### 5. Logging
+
+```python
+if iter_num % log_interval == 0 and master_process:
+    lossf = loss.item() * gradient_accumulation_steps
+    if local_iter_num >= 5:
+        mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+        running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+    print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+```
+
+## Configuration parameters
+
+### I/O settings
+
+<ParamField path="out_dir" type="str" default="'out'">
+  Directory for saving checkpoints
+</ParamField>
+
+<ParamField path="eval_interval" type="int" default="2000">
+  How often to evaluate on val set and save checkpoints
+</ParamField>
+
+<ParamField path="log_interval" type="int" default="1">
+  How often to log training metrics
+</ParamField>
+
+<ParamField path="eval_iters" type="int" default="200">
+  Number of iterations for loss estimation
+</ParamField>
+
+<ParamField path="eval_only" type="bool" default="False">
+  If True, exit after first evaluation (useful for testing)
+</ParamField>
+
+<ParamField path="always_save_checkpoint" type="bool" default="True">
+  If True, save checkpoint after each eval even if val loss didn't improve
+</ParamField>
+
+<ParamField path="init_from" type="str" default="'scratch'">
+  Initialization mode: `'scratch'`, `'resume'`, or a GPT-2 variant (`'gpt2'`, `'gpt2-medium'`, `'gpt2-large'`, `'gpt2-xl'`)
+</ParamField>
+
+### Data settings
+
+<ParamField path="dataset" type="str" default="'openwebtext'">
+  Name of dataset (must have corresponding data/{dataset}/ directory)
+</ParamField>
+
+<ParamField path="gradient_accumulation_steps" type="int" default="40">
+  Accumulate gradients over this many steps to simulate larger batches
+</ParamField>
+
+<ParamField path="batch_size" type="int" default="12">
+  Micro-batch size (per GPU if using DDP)
+</ParamField>
+
+<ParamField path="block_size" type="int" default="1024">
+  Context length for training sequences
+</ParamField>
+
+### Model architecture
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer layers
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout rate (0.0 for pretraining, 0.1+ for finetuning)
+</ParamField>
+
+<ParamField path="bias" type="bool" default="False">
+  Use bias in Linear and LayerNorm layers
+</ParamField>
+
+### Optimizer settings
+
+<ParamField path="learning_rate" type="float" default="6e-4">
+  Maximum learning rate
+</ParamField>
+
+<ParamField path="max_iters" type="int" default="600000">
+  Total number of training iterations
+</ParamField>
+
+<ParamField path="weight_decay" type="float" default="1e-1">
+  Weight decay coefficient
+</ParamField>
+
+<ParamField path="beta1" type="float" default="0.9">
+  AdamW beta1 parameter
+</ParamField>
+
+<ParamField path="beta2" type="float" default="0.95">
+  AdamW beta2 parameter
+</ParamField>
+
+<ParamField path="grad_clip" type="float" default="1.0">
+  Gradient clipping threshold (0.0 to disable)
+</ParamField>
+
+### Learning rate decay
+
+<ParamField path="decay_lr" type="bool" default="True">
+  Enable learning rate decay
+</ParamField>
+
+<ParamField path="warmup_iters" type="int" default="2000">
+  Number of warmup iterations
+</ParamField>
+
+<ParamField path="lr_decay_iters" type="int" default="600000">
+  Iterations for learning rate decay (should be ~= max_iters)
+</ParamField>
+
+<ParamField path="min_lr" type="float" default="6e-5">
+  Minimum learning rate (should be ~= learning_rate/10)
+</ParamField>
+
+### System settings
+
+<ParamField path="device" type="str" default="'cuda'">
+  Device to train on: `'cpu'`, `'cuda'`, `'cuda:0'`, `'cuda:1'`, `'mps'`, etc.
+</ParamField>
+
+<ParamField path="dtype" type="str" default="'bfloat16' or 'float16'">
+  Data type for training: `'float32'`, `'bfloat16'`, or `'float16'`. Automatically selects bfloat16 if supported.
+</ParamField>
+
+<ParamField path="compile" type="bool" default="True">
+  Use PyTorch 2.0 compilation for faster training
+</ParamField>
+
+### DDP settings
+
+<ParamField path="backend" type="str" default="'nccl'">
+  DDP backend: `'nccl'` (recommended for CUDA) or `'gloo'`
+</ParamField>
+
+## Checkpointing
+
+Checkpoints are saved to `{out_dir}/ckpt.pt` and contain:
+
+```python
+{
+    'model': model.state_dict(),
+    'optimizer': optimizer.state_dict(),
+    'model_args': model_args,
+    'iter_num': iter_num,
+    'best_val_loss': best_val_loss,
+    'config': config,
+}
+```
+
+To resume training from a checkpoint, set `init_from='resume'` and ensure the checkpoint exists in `out_dir`.
+
+## WandB integration
+
+<ParamField path="wandb_log" type="bool" default="False">
+  Enable Weights & Biases logging
+</ParamField>
+
+<ParamField path="wandb_project" type="str" default="'owt'">
+  WandB project name
+</ParamField>
+
+<ParamField path="wandb_run_name" type="str" default="'gpt2'">
+  WandB run name
+</ParamField>
+
+When enabled, the following metrics are logged:
+- Training loss
+- Validation loss
+- Learning rate
+- Model FLOPs Utilization (MFU)
+
+## Performance tips
+
+<Tip>
+  **Use gradient accumulation** to simulate larger batch sizes without running out of memory. Effective batch size = `batch_size * gradient_accumulation_steps * num_gpus`.
+</Tip>
+
+<Tip>
+  **Enable compilation** with `compile=True` to use PyTorch 2.0's optimizations for faster training (requires PyTorch >= 2.0).
+</Tip>
+
+<Tip>
+  **Use bfloat16** if your GPU supports it (requires Ampere or newer). It provides better numerical stability than float16 without requiring gradient scaling.
+</Tip>
+
+<Tip>
+  **Allow TF32** (enabled by default) for ~20% speedup on Ampere GPUs without loss of accuracy.
+</Tip>

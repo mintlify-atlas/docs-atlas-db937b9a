@@ -1,0 +1,332 @@
+---
+title: Benchmarking
+description: Use bench.py to profile and benchmark nanoGPT model performance
+---
+
+The `bench.py` script provides a simplified benchmarking tool to measure training performance without the overhead of data loading, logging, and checkpointing.
+
+## Overview
+
+`bench.py` is a stripped-down version of `train.py` that focuses on the core training loop for accurate performance measurement.
+
+<Note>
+From README.md:207: "For simple model benchmarking and profiling, bench.py might be useful. It's identical to what happens in the meat of the training loop of train.py, but omits much of the other complexities."
+</Note>
+
+## Basic benchmarking
+
+### Run a simple benchmark
+
+Execute bench.py with default settings:
+
+```bash
+python bench.py
+```
+
+This will:
+1. Run 10 warmup iterations (burnin phase)
+2. Run 20 benchmark iterations
+3. Report average time per iteration and MFU
+
+### Benchmark output
+
+Expected output:
+```
+Compiling model...
+number of parameters: 85.00M
+0/10 loss: 10.9596
+1/10 loss: 10.9321
+...
+time per iteration: 135.42ms, MFU: 45.23%
+```
+
+## Configuration options
+
+Customize benchmark parameters by modifying the script or using the configurator.
+
+### Key parameters
+
+From bench.py:12-20:
+
+```python
+batch_size = 12
+block_size = 1024
+bias = False
+real_data = True
+seed = 1337
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+compile = True # use PyTorch 2.0 to compile the model to be faster
+profile = False # use pytorch profiler, or just simple benchmarking?
+```
+
+<Accordion title="Parameter descriptions">
+
+**batch_size**: Number of sequences per batch
+- Default: 12
+- Increase if you have more GPU memory
+- Directly impacts throughput
+
+**block_size**: Context length (sequence length)
+- Default: 1024
+- Memory usage scales quadratically with attention
+- Larger values = more memory required
+
+**bias**: Include bias in Linear and LayerNorm layers
+- Default: False
+- False is faster and uses less memory
+
+**real_data**: Use actual OpenWebText data vs random data
+- Default: True
+- Set to False to isolate model performance from I/O
+
+**compile**: Enable PyTorch 2.0 compilation
+- Default: True
+- Significant speedup (~2x) when enabled
+
+**profile**: Use PyTorch profiler for detailed metrics
+- Default: False
+- Enable for detailed profiling analysis
+
+</Accordion>
+
+### Override via command line
+
+Use the configurator to override parameters:
+
+```bash
+python bench.py --batch_size=8 --compile=False --device=cuda:1
+```
+
+## Benchmarking modes
+
+### Simple benchmarking (default)
+
+The default mode runs a warmup phase followed by timed iterations (bench.py:98-117):
+
+```python
+# simple benchmarking
+torch.cuda.synchronize()
+for stage, num_steps in enumerate([10, 20]): # burnin, then benchmark
+    t0 = time.time()
+    X, Y = get_batch('train')
+    for k in range(num_steps):
+        with ctx:
+            logits, loss = model(X, Y)
+        X, Y = get_batch('train')
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        lossf = loss.item()
+        print(f"{k}/{num_steps} loss: {lossf:.4f}")
+    torch.cuda.synchronize()
+    t1 = time.time()
+    dt = t1-t0
+    mfu = model.estimate_mfu(batch_size * 1 * num_steps, dt)
+    if stage == 1:
+        print(f"time per iteration: {dt/num_steps*1000:.4f}ms, MFU: {mfu*100:.2f}%")
+```
+
+<Note>
+The two-stage approach ensures that compilation overhead and cache warmup don't skew results.
+</Note>
+
+### PyTorch Profiler mode
+
+Enable detailed profiling for analysis in TensorBoard:
+
+```bash
+python bench.py --profile=True
+```
+
+The profiler configuration (bench.py:66-94):
+
+```python
+if profile:
+    wait, warmup, active = 5, 5, 5
+    num_steps = wait + warmup + active
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+        schedule=torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=1),
+        on_trace_ready=torch.profiler.tensorboard_trace_handler('./bench_log'),
+        record_shapes=False,
+        profile_memory=False,
+        with_stack=False,
+        with_flops=True,
+        with_modules=False,
+    ) as prof:
+        # ... training loop ...
+        prof.step() # notify the profiler at end of each step
+```
+
+### View profiler results
+
+After profiling, view results in TensorBoard:
+
+```bash
+tensorboard --logdir=./bench_log
+```
+
+<Tip>
+The profiler provides detailed breakdowns of:
+- Time spent in each operation
+- Memory usage patterns
+- GPU kernel efficiency
+- FLOPS achieved
+</Tip>
+
+## Data loading options
+
+### Real data (default)
+
+Use actual OpenWebText data (bench.py:33-43):
+
+```python
+if real_data:
+    dataset = 'openwebtext'
+    data_dir = os.path.join('data', dataset)
+    train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+    def get_batch(split):
+        data = train_data
+        ix = torch.randint(len(data) - block_size, (batch_size,))
+        x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+        y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        return x, y
+```
+
+### Fixed random data
+
+Isolate model performance from data loading (bench.py:44-48):
+
+```python
+else:
+    # alternatively, if fixed data is desired to not care about data loading
+    x = torch.randint(50304, (batch_size, block_size), device=device)
+    y = torch.randint(50304, (batch_size, block_size), device=device)
+    get_batch = lambda split: (x, y)
+```
+
+<Warning>
+Random data eliminates data loading overhead but may not represent real training performance accurately.
+</Warning>
+
+## Model configuration
+
+The benchmark uses a GPT-2 124M sized model by default (bench.py:51-56):
+
+```python
+gptconf = GPTConfig(
+    block_size = block_size,
+    n_layer = 12, n_head = 12, n_embd = 768,
+    dropout = 0,
+    bias = bias,
+)
+```
+
+### Benchmark different model sizes
+
+Modify the configuration to test different architectures:
+
+<Accordion title="GPT-2 model sizes">
+
+**GPT-2 Small (124M)**
+```python
+n_layer = 12, n_head = 12, n_embd = 768
+```
+
+**GPT-2 Medium (350M)**
+```python
+n_layer = 24, n_head = 16, n_embd = 1024
+```
+
+**GPT-2 Large (774M)**
+```python
+n_layer = 36, n_head = 20, n_embd = 1280
+```
+
+**GPT-2 XL (1.5B)**
+```python
+n_layer = 48, n_head = 25, n_embd = 1600
+```
+
+</Accordion>
+
+## Interpreting results
+
+### Time per iteration
+
+Measures the wall-clock time for one training step:
+- **Less than 100ms**: Excellent performance
+- **100-200ms**: Good performance  
+- **Greater than 200ms**: May indicate configuration issues
+
+### Model FLOPs Utilization (MFU)
+
+Percentage of theoretical peak FLOPS achieved:
+- **Greater than 50%**: Excellent utilization
+- **40-50%**: Good utilization
+- **Less than 40%**: Room for optimization
+
+<Note>
+MFU is calculated relative to A100 GPU peak performance (312 TFLOPS for bfloat16).
+</Note>
+
+## Common benchmarking scenarios
+
+### Compare compile on/off
+
+```bash
+# With compile
+python bench.py --compile=True
+
+# Without compile  
+python bench.py --compile=False
+```
+
+Expected improvement: ~2x faster with compile enabled.
+
+### Test different precisions
+
+```bash
+# bfloat16 (fastest on A100/H100)
+python bench.py --dtype=bfloat16
+
+# float16 (fast on most GPUs)
+python bench.py --dtype=float16
+
+# float32 (baseline)
+python bench.py --dtype=float32
+```
+
+### Memory-limited benchmarking
+
+Reduce batch size and block size for smaller GPUs:
+
+```bash
+python bench.py --batch_size=4 --block_size=512
+```
+
+### Multi-GPU benchmarking
+
+Test on different GPUs:
+
+```bash
+# GPU 0
+python bench.py --device=cuda:0
+
+# GPU 1
+python bench.py --device=cuda:1
+```
+
+## Benchmark best practices
+
+1. **Run multiple times**: Performance can vary between runs
+2. **Warm GPU**: First run may be slower due to GPU initialization
+3. **Close other processes**: Ensure GPU is not being used by other tasks
+4. **Monitor temperature**: GPU throttling can affect results
+5. **Consistent settings**: Use same batch_size/block_size for fair comparisons
+
+<Tip>
+For the most accurate results, run benchmarks multiple times and take the average of the middle runs (excluding the first warm-up run).
+</Tip>

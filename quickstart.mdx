@@ -1,80 +1,308 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Train your first GPT model on Shakespeare in minutes
 ---
 
-## Get started in three steps
+The fastest way to get started with nanoGPT is to train a character-level GPT on the works of Shakespeare. This tutorial will walk you through the complete process.
 
-Get your documentation site running locally and make your first customization.
+## Overview
 
-### Step 1: Set up your local environment
+You'll learn how to:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+- Prepare the Shakespeare dataset for training
+- Train a small GPT model from scratch
+- Generate text samples from your trained model
+- Adjust hyperparameters for different hardware
+
+<Note>
+  This quickstart uses character-level modeling (not BPE tokens) for simplicity. The entire dataset is just 1MB and training takes only a few minutes.
+</Note>
+
+## Prepare the dataset
+
+First, download and prepare the Shakespeare dataset:
+
+<Steps>
+  <Step title="Run the data preparation script">
+    The preparation script downloads the tiny Shakespeare dataset and converts it to binary format:
+
+    ```bash
+    python data/shakespeare_char/prepare.py
+    ```
+
+    This script:
+    - Downloads the complete works of Shakespeare (~1MB text file)
+    - Creates a character-to-integer mapping
+    - Splits the data into training (90%) and validation (10%) sets
+    - Saves `train.bin` and `val.bin` in `data/shakespeare_char/`
+  </Step>
+
+  <Step title="Verify the output">
+    You should see output similar to:
+
+    ```
+    length of dataset in characters: 1,115,394
+    all the unique characters: 
+     !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
+    vocab size: 65
+    train has 1,003,854 tokens
+    val has 111,540 tokens
+    ```
+
+    The dataset contains 65 unique characters including uppercase, lowercase, and punctuation.
+  </Step>
+</Steps>
+
+## Train the model
+
+Now you can train a GPT model on this data. The training approach depends on your hardware.
+
+<Tabs>
+  <Tab title="With GPU">
+    If you have a GPU, you can train a small but capable model using the provided config file:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py
+    ```
+
+    ### Model architecture
+
+    The config file `config/train_shakespeare_char.py` defines a "baby GPT" with:
+
+    ```python
+    # Model hyperparameters
+    n_layer = 6        # 6 transformer layers
+    n_head = 6         # 6 attention heads
+    n_embd = 384       # 384-dimensional embeddings
+    dropout = 0.2      # 20% dropout for regularization
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    # Training hyperparameters
+    batch_size = 64
+    block_size = 256   # Context of up to 256 characters
+    max_iters = 5000   # 5000 training iterations
+    learning_rate = 1e-3
+    ```
+
+    ### Training progress
+
+    On an A100 GPU, this takes about **3 minutes** and achieves a validation loss around **1.47**:
+
+    ```
+    step 0: train loss 4.2253, val loss 4.2272
+    step 250: train loss 1.8324, val loss 1.9012
+    step 500: train loss 1.5892, val loss 1.6845
+    ...
+    step 4750: train loss 1.3012, val loss 1.4721
+    step 5000: train loss 1.2945, val loss 1.4697
+    ```
+
+    Model checkpoints are saved to `out-shakespeare-char/` directory.
+
+    <Tip>
+      On Apple Silicon Macs, add `--device=mps` to use the GPU for 2-3x speedup over CPU.
+    </Tip>
+  </Tab>
+
+  <Tab title="CPU / Low-end hardware">
+    If you only have a CPU or limited resources, use a smaller model configuration:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --device=cpu \
+      --compile=False \
+      --eval_iters=20 \
+      --log_interval=1 \
+      --block_size=64 \
+      --batch_size=12 \
+      --n_layer=4 \
+      --n_head=4 \
+      --n_embd=128 \
+      --max_iters=2000 \
+      --lr_decay_iters=2000 \
+      --dropout=0.0
+    ```
+
+    ### Parameter explanations
+
+    <ParamField path="device" type="string" default="cuda">
+      Set to `cpu` to run on CPU instead of GPU
+    </ParamField>
+
+    <ParamField path="compile" type="boolean" default="true">
+      Disable PyTorch 2.0 compilation (not supported on all platforms)
+    </ParamField>
+
+    <ParamField path="block_size" type="integer" default="256">
+      Reduced to 64 characters of context to save memory
+    </ParamField>
+
+    <ParamField path="batch_size" type="integer" default="64">
+      Reduced to 12 examples per batch to fit in CPU memory
+    </ParamField>
+
+    <ParamField path="n_layer" type="integer" default="6">
+      Reduced to 4 transformer layers for faster training
+    </ParamField>
+
+    <ParamField path="n_embd" type="integer" default="384">
+      Reduced to 128-dimensional embeddings
+    </ParamField>
+
+    This configuration trains in about **3 minutes on CPU** and achieves validation loss around **1.88**.
+  </Tab>
+</Tabs>
+
+## Generate text samples
+
+Once training completes, generate Shakespeare-style text from your model:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+If you trained on CPU, add the `--device=cpu` flag:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char --device=cpu
+```
+
+### Example output
+
+With the GPU-trained model (validation loss 1.47), you might see:
+
+```
+ANGELO:
+And cowards it be strawn to my bed,
+And thrust the gates of my threats,
+Because he that ale away, and hang'd
+An one with him.
+
+DUKE VINCENTIO:
+I thank your eyes against it.
+
+DUKE VINCENTIO:
+Then will answer him to save the malm:
+And what have you tyrannous shall do this?
+```
+
+Not bad for a character-level model trained in just 3 minutes!
+
+### Customize generation
+
+You can control the generation process with additional parameters:
+
+```bash
+python sample.py \
+  --out_dir=out-shakespeare-char \
+  --start="ROMEO:" \
+  --num_samples=5 \
+  --max_new_tokens=200 \
+  --temperature=0.8 \
+  --top_k=200
+```
+
+<ParamField path="start" type="string" default="\n">
+  The prompt to start generation. Can also load from a file with `FILE:prompt.txt`
+</ParamField>
+
+<ParamField path="num_samples" type="integer" default="10">
+  Number of independent samples to generate
+</ParamField>
+
+<ParamField path="max_new_tokens" type="integer" default="500">
+  Maximum number of tokens to generate per sample
+</ParamField>
+
+<ParamField path="temperature" type="float" default="0.8">
+  Sampling temperature. Lower values (0.6-0.8) are more conservative, higher values (1.0+) more creative
+</ParamField>
+
+<ParamField path="top_k" type="integer" default="200">
+  Only sample from the top k most likely tokens at each step
+</ParamField>
+
+## Understanding the training loop
+
+Let's examine what happens during training. The core training loop in `train.py` follows this pattern:
+
+```python train.py
+# Training loop
+while True:
+    # Get learning rate for this iteration (cosine decay with warmup)
+    lr = get_lr(iter_num) if decay_lr else learning_rate
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    # Evaluate on train/val sets periodically
+    if iter_num % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        
+        # Save checkpoint if validation improved
+        if losses['val'] < best_val_loss:
+            torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    # Forward pass with mixed precision
+    with ctx:
+        logits, loss = model(X, Y)
+    
+    # Backward pass and optimizer step
+    scaler.scale(loss).backward()
+    scaler.step(optimizer)
+    scaler.update()
+    
+    iter_num += 1
+    if iter_num > max_iters:
+        break
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Finetune GPT-2" icon="wrench">
+    Learn how to finetune pretrained GPT-2 models on your own data for better results
+  </Card>
+  
+  <Card title="Training configuration" icon="sliders">
+    Explore all available hyperparameters and configuration options
+  </Card>
+  
+  <Card title="Data preparation" icon="database">
+    Prepare your own datasets for training custom models
+  </Card>
+  
+  <Card title="Distributed training" icon="server">
+    Scale up to multi-GPU training with PyTorch DDP
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Common issues
+
+<AccordionGroup>
+  <Accordion title="Training is very slow">
+    - Ensure you're using a GPU with `--device=cuda` (or `--device=mps` on Mac)
+    - Verify PyTorch 2.0+ is installed to enable `torch.compile()`
+    - Check that compilation is enabled (don't use `--compile=False` on GPU)
+  </Accordion>
+
+  <Accordion title="Out of memory errors">
+    Reduce memory usage by:
+    ```bash
+    python train.py config/train_shakespeare_char.py \
+      --batch_size=32 \
+      --block_size=128 \
+      --n_layer=4 \
+      --n_embd=256
+    ```
+  </Accordion>
+
+  <Accordion title="Loss not decreasing">
+    - Verify the data preparation completed successfully
+    - Check that `train.bin` and `val.bin` exist in `data/shakespeare_char/`
+    - Try increasing the learning rate or reducing dropout
+  </Accordion>
+
+  <Accordion title="Generated text is nonsense">
+    - The model may need more training iterations
+    - Try lowering the temperature: `--temperature=0.7`
+    - Check that you're loading the correct checkpoint with `--out_dir`
+  </Accordion>
+</AccordionGroup>

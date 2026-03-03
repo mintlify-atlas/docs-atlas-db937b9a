@@ -1,0 +1,285 @@
+---
+title: Performance optimization
+description: Optimize nanoGPT training speed with PyTorch 2.0 compile, Flash Attention, and precision settings
+---
+
+nanoGPT is optimized for maximum training efficiency. This guide covers key performance optimizations you can leverage to speed up your training runs.
+
+## PyTorch 2.0 compile
+
+The `torch.compile()` feature in PyTorch 2.0 provides significant speedups with a single line of code.
+
+### Enable compile mode
+
+By default, nanoGPT uses PyTorch 2.0's compile feature. In train.py:74, the `compile` flag is set to `True`:
+
+```python
+python train.py --compile=True
+```
+
+<Note>
+PyTorch compile can reduce iteration time from ~250ms to ~135ms, nearly a 2x speedup.
+</Note>
+
+The compilation happens at train.py:205-208:
+
+```python
+if compile:
+    print("compiling the model... (takes a ~minute)")
+    unoptimized_model = model
+    model = torch.compile(model) # requires PyTorch 2.0
+```
+
+### Disable compile mode
+
+On some platforms (like Windows) or older PyTorch versions, compile may not be available:
+
+```bash
+python train.py --compile=False
+```
+
+<Warning>
+Disabling compile will slow down training but ensures compatibility on all platforms.
+</Warning>
+
+## Flash Attention
+
+Flash Attention uses optimized CUDA kernels for dramatically faster attention computation.
+
+### Automatic detection
+
+The model automatically detects Flash Attention support in model.py:44-50:
+
+```python
+# flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
+self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not self.flash:
+    print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+    # causal mask to ensure that attention is only applied to the left in the input sequence
+    self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                .view(1, 1, config.block_size, config.block_size))
+```
+
+### Flash vs. standard attention
+
+When Flash Attention is available (model.py:62-64):
+
+```python
+if self.flash:
+    # efficient attention using Flash Attention CUDA kernels
+    y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+```
+
+Otherwise, the manual attention implementation is used (model.py:65-71):
+
+```python
+else:
+    # manual implementation of attention
+    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+    att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
+    att = F.softmax(att, dim=-1)
+    att = self.attn_dropout(att)
+    y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+```
+
+<Tip>
+Flash Attention requires PyTorch >= 2.0 and CUDA. Make sure you have a recent PyTorch installation.
+</Tip>
+
+## Mixed precision training
+
+nanoGPT supports multiple precision modes to balance speed and memory usage.
+
+### Precision options
+
+Set the `dtype` parameter in train.py:73:
+
+```python
+# 'float32', 'bfloat16', or 'float16'
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+```
+
+<Accordion title="Precision mode comparison">
+
+**bfloat16** (recommended for A100/H100)
+- Best balance of speed and stability
+- Wider dynamic range than float16
+- No gradient scaling required
+- Requires GPU support (A100, H100, etc.)
+
+**float16**
+- Fast on most modern GPUs
+- Requires gradient scaling (automatic in nanoGPT)
+- May require careful tuning for stability
+
+**float32**
+- Slowest but most stable
+- Use for debugging or CPU training
+- No special GPU features required
+
+</Accordion>
+
+### Automatic mixed precision
+
+The training script uses PyTorch's autocast context (train.py:112):
+
+```python
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+```
+
+For float16, gradient scaling is enabled automatically (train.py:196):
+
+```python
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+```
+
+## TF32 precision
+
+TensorFloat-32 (TF32) provides a speedup on Ampere GPUs and newer.
+
+### Enable TF32
+
+By default, nanoGPT enables TF32 for matmul and cuDNN operations (train.py:107-108):
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+```
+
+<Note>
+TF32 is only available on NVIDIA Ampere GPUs (A100, RTX 3090, etc.) and newer.
+</Note>
+
+## Fused AdamW optimizer
+
+nanoGPT automatically uses the fused AdamW optimizer when available for faster updates.
+
+### Automatic detection
+
+The optimizer setup (model.py:281-285) detects fused AdamW support:
+
+```python
+fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+use_fused = fused_available and device_type == 'cuda'
+extra_args = dict(fused=True) if use_fused else dict()
+optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+print(f"using fused AdamW: {use_fused}")
+```
+
+## Model FLOPs utilization (MFU)
+
+Track how efficiently your model uses GPU compute with MFU metrics.
+
+### MFU calculation
+
+The model estimates MFU based on A100 peak FLOPS (model.py:289-303):
+
+```python
+def estimate_mfu(self, fwdbwd_per_iter, dt):
+    """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+    N = self.get_num_params()
+    cfg = self.config
+    L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+    flops_per_token = 6*N + 12*L*H*Q*T
+    flops_per_fwdbwd = flops_per_token * T
+    flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+    flops_achieved = flops_per_iter * (1.0/dt) # per second
+    flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
+    mfu = flops_achieved / flops_promised
+    return mfu
+```
+
+<Tip>
+Good MFU values are typically 40-60% on A100 GPUs. Higher is better but 100% is theoretical maximum.
+</Tip>
+
+## Gradient accumulation
+
+Simulate larger batch sizes without increasing memory usage.
+
+### Configure accumulation steps
+
+Set `gradient_accumulation_steps` to simulate larger batches (train.py:48):
+
+```python
+gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+```
+
+For GPT-2 124M training, the effective batch size is:
+```
+12 batch_size × 1024 block_size × 40 grad_accum × 8 GPUs = ~491,520 tokens
+```
+
+### Distributed training adjustment
+
+With DDP, gradient accumulation is automatically scaled (train.py:94-95):
+
+```python
+assert gradient_accumulation_steps % ddp_world_size == 0
+gradient_accumulation_steps //= ddp_world_size
+```
+
+## Memory optimizations
+
+### Disable bias parameters
+
+Set `bias=False` for faster and more memory-efficient training (train.py:56):
+
+```python
+bias = False # do we use bias inside LayerNorm and Linear layers?
+```
+
+<Note>
+Disabling bias in LayerNorm and Linear layers provides a small speedup and reduces memory usage with minimal impact on model quality.
+</Note>
+
+### Efficient data loading
+
+Use memory-mapped files to avoid loading the entire dataset into RAM (train.py:117-122):
+
+```python
+data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+```
+
+### Pinned memory for GPU transfers
+
+Pinned memory enables faster CPU-to-GPU transfers (train.py:128):
+
+```python
+x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+```
+
+## Platform-specific optimizations
+
+### Apple Silicon (MPS)
+
+For M1/M2/M3 Macs, use the Metal Performance Shaders backend:
+
+```bash
+python train.py --device=mps
+```
+
+<Tip>
+MPS can provide 2-3x speedup compared to CPU training on Apple Silicon Macs.
+</Tip>
+
+### CPU training
+
+For CPU-only environments, disable compile and adjust settings:
+
+```bash
+python train.py --device=cpu --compile=False --eval_iters=20 --block_size=64 --batch_size=12
+```
+
+## Performance checklist
+
+Before training, verify these optimizations are enabled:
+
+- [ ] PyTorch 2.0+ installed for compile and Flash Attention
+- [ ] `--compile=True` enabled (default)
+- [ ] `dtype='bfloat16'` on supported GPUs (A100, H100)
+- [ ] TF32 enabled on Ampere+ GPUs (automatic)
+- [ ] Fused AdamW detected and enabled (check logs)
+- [ ] Appropriate gradient accumulation for your GPU memory
+- [ ] `bias=False` for slightly better efficiency

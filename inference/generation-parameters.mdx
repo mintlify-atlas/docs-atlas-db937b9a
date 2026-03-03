@@ -1,0 +1,230 @@
+---
+title: Generation parameters
+description: Control text generation quality and behavior with sampling parameters
+---
+
+The sampling script provides several parameters to control how text is generated. These parameters affect the randomness, diversity, and length of the generated outputs.
+
+## Core parameters
+
+<ParamField path="num_samples" type="int" default="10">
+  Number of independent samples to generate. Each sample starts from the same prompt but produces different output due to randomness.
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" default="500">
+  Maximum number of tokens to generate in each sample. This controls the length of the generated text.
+</ParamField>
+
+<ParamField path="start" type="string" default="\n">
+  Starting prompt for generation. Can be:
+  - Direct text: `"Once upon a time"`
+  - Special token: `"<|endoftext|>"`
+  - File reference: `"FILE:prompt.txt"` (reads prompt from file)
+</ParamField>
+
+## Sampling control
+
+### Temperature
+
+<ParamField path="temperature" type="float" default="0.8">
+  Controls randomness in token selection:
+  - `1.0` - No change to the model's predictions
+  - `< 1.0` - Less random, more conservative outputs
+  - `> 1.0` - More random, more diverse outputs
+  - Approaching `0.0` - Nearly deterministic (always picks most likely token)
+</ParamField>
+
+Temperature affects the probability distribution over tokens. Lower temperatures make the model more confident and repetitive, while higher temperatures increase diversity but may reduce coherence.
+
+<CodeGroup>
+```bash Conservative (temperature=0.5)
+python sample.py \
+    --out_dir=out-shakespeare-char \
+    --temperature=0.5 \
+    --num_samples=3
+```
+
+```bash Balanced (temperature=0.8)
+python sample.py \
+    --out_dir=out-shakespeare-char \
+    --temperature=0.8 \
+    --num_samples=3
+```
+
+```bash Creative (temperature=1.2)
+python sample.py \
+    --out_dir=out-shakespeare-char \
+    --temperature=1.2 \
+    --num_samples=3
+```
+</CodeGroup>
+
+### Top-k sampling
+
+<ParamField path="top_k" type="int" default="200">
+  Limits token selection to the top-k most likely tokens. All other tokens have their probability set to zero.
+  - Higher values (e.g., `200`, `500`) - More diversity
+  - Lower values (e.g., `10`, `50`) - More focused outputs
+  - `None` or `0` - No top-k filtering (use full vocabulary)
+</ParamField>
+
+Top-k sampling prevents the model from selecting very unlikely tokens, which can improve output quality.
+
+<CodeGroup>
+```bash Focused (top_k=50)
+python sample.py \
+    --out_dir=out-shakespeare-char \
+    --top_k=50 \
+    --temperature=0.8
+```
+
+```bash Balanced (top_k=200)
+python sample.py \
+    --out_dir=out-shakespeare-char \
+    --top_k=200 \
+    --temperature=0.8
+```
+
+```bash Diverse (top_k=500)
+python sample.py \
+    --out_dir=out-shakespeare-char \
+    --top_k=500 \
+    --temperature=0.8
+```
+</CodeGroup>
+
+## Reproducibility
+
+<ParamField path="seed" type="int" default="1337">
+  Random seed for reproducible generation. Using the same seed with the same parameters will produce identical outputs.
+</ParamField>
+
+Set the seed for reproducible results:
+
+```bash
+python sample.py \
+    --seed=42 \
+    --out_dir=out-shakespeare-char \
+    --num_samples=5
+```
+
+The seed affects both CPU and CUDA random number generators:
+
+```python
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+```
+
+## Complete example
+
+Here's how the generation loop works in `sample.py`:
+
+```python
+# encode the beginning of the prompt
+if start.startswith('FILE:'):
+    with open(start[5:], 'r', encoding='utf-8') as f:
+        start = f.read()
+start_ids = encode(start)
+x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+
+# run generation
+with torch.no_grad():
+    with ctx:
+        for k in range(num_samples):
+            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+            print(decode(y[0].tolist()))
+            print('---------------')
+```
+
+## Configuration file
+
+You can override parameters using the configurator system:
+
+1. Create a config file (e.g., `my_sample_config.py`):
+
+```python my_sample_config.py
+out_dir = 'out-shakespeare-char'
+start = "ROMEO:"
+num_samples = 5
+max_new_tokens = 300
+temperature = 0.7
+top_k = 100
+seed = 42
+device = 'cuda'
+```
+
+2. Run sampling with the config:
+
+```bash
+python sample.py config=my_sample_config.py
+```
+
+Command-line arguments will override config file values:
+
+```bash
+python sample.py config=my_sample_config.py --temperature=0.9 --num_samples=10
+```
+
+## Parameter recommendations
+
+### For coherent, focused text
+
+```bash
+python sample.py \
+    --temperature=0.6 \
+    --top_k=50 \
+    --max_new_tokens=500
+```
+
+### For creative, diverse text
+
+```bash
+python sample.py \
+    --temperature=1.0 \
+    --top_k=300 \
+    --max_new_tokens=500
+```
+
+### For long-form generation
+
+```bash
+python sample.py \
+    --max_new_tokens=2000 \
+    --temperature=0.8 \
+    --top_k=200 \
+    --num_samples=1
+```
+
+<Note>
+  The optimal parameters depend on your model, training data, and use case. Experiment with different combinations to find what works best.
+</Note>
+
+## Tokenization
+
+The script automatically handles tokenization based on your model:
+
+### Custom datasets
+
+If you trained on a custom dataset with a `meta.pkl` file:
+
+```python
+# Character-level encoding from meta.pkl
+stoi, itos = meta['stoi'], meta['itos']
+encode = lambda s: [stoi[c] for c in s]
+decode = lambda l: ''.join([itos[i] for i in l])
+```
+
+### GPT-2 models
+
+For pre-trained GPT-2 models or when no `meta.pkl` exists:
+
+```python
+# BPE encoding using tiktoken
+enc = tiktoken.get_encoding("gpt2")
+encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+decode = lambda l: enc.decode(l)
+```
+
+<Note>
+  The `<|endoftext|>` token is a special token in GPT-2 that indicates the end of a document. You can use it as a starting prompt to generate from scratch.
+</Note>

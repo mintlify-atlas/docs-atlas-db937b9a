@@ -1,0 +1,215 @@
+---
+title: Installation
+description: Set up your environment and install nanoGPT dependencies
+---
+
+Get nanoGPT up and running on your system in just a few minutes.
+
+## Prerequisites
+
+Before installing nanoGPT, ensure you have:
+
+- **Python 3.8+** installed on your system
+- **Git** for cloning the repository
+- **(Optional) CUDA-capable GPU** for faster training
+
+## Clone the repository
+
+First, clone the nanoGPT repository from GitHub:
+
+```bash
+git clone https://github.com/karpathy/nanoGPT.git
+cd nanoGPT
+```
+
+## Install dependencies
+
+Install all required Python packages using pip:
+
+```bash
+pip install torch numpy transformers datasets tiktoken wandb tqdm
+```
+
+### Dependency details
+
+<AccordionGroup>
+  <Accordion title="pytorch - Deep learning framework">
+    The core framework for building and training neural networks. nanoGPT uses PyTorch for all model operations, automatic differentiation, and GPU acceleration.
+    
+    For GPU support, install the CUDA-enabled version from [pytorch.org](https://pytorch.org).
+  </Accordion>
+
+  <Accordion title="numpy - Numerical computing">
+    Used for efficient array operations, particularly for data loading with memory-mapped files (`np.memmap`).
+  </Accordion>
+
+  <Accordion title="transformers - Hugging Face library">
+    Required to load pretrained GPT-2 checkpoints from OpenAI. The `GPT.from_pretrained()` method uses this library to download and convert GPT-2 weights.
+  </Accordion>
+
+  <Accordion title="datasets - Dataset utilities">
+    Needed if you want to download and preprocess OpenWebText or other datasets from Hugging Face's dataset hub.
+  </Accordion>
+
+  <Accordion title="tiktoken - Fast BPE tokenization">
+    OpenAI's fast tokenizer implementation for GPT-2's Byte Pair Encoding. Used when finetuning with GPT-2 tokenization.
+  </Accordion>
+
+  <Accordion title="wandb - Experiment tracking">
+    Optional logging tool for tracking training metrics. Can be disabled by setting `wandb_log=False` in config files.
+  </Accordion>
+
+  <Accordion title="tqdm - Progress bars">
+    Provides visual progress indicators for data preparation scripts.
+  </Accordion>
+</AccordionGroup>
+
+## Platform-specific setup
+
+<Tabs>
+  <Tab title="Linux / Windows with GPU">
+    For GPU acceleration, install PyTorch with CUDA support:
+
+    ```bash
+    # For CUDA 11.8
+    pip install torch --index-url https://download.pytorch.org/whl/cu118
+    
+    # For CUDA 12.1
+    pip install torch --index-url https://download.pytorch.org/whl/cu121
+    ```
+
+    Then install the remaining dependencies:
+
+    ```bash
+    pip install numpy transformers datasets tiktoken wandb tqdm
+    ```
+
+    <Note>
+      nanoGPT uses PyTorch 2.0+ features like `torch.compile()` for performance. Make sure you have PyTorch 2.0 or later installed.
+    </Note>
+  </Tab>
+
+  <Tab title="macOS (Apple Silicon)">
+    On Apple Silicon Macs (M1/M2/M3), install PyTorch with MPS (Metal Performance Shaders) support:
+
+    ```bash
+    pip install torch numpy transformers datasets tiktoken wandb tqdm
+    ```
+
+    When training, use the `--device=mps` flag to leverage the on-chip GPU for 2-3x speedup:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --device=mps
+    ```
+
+    <Tip>
+      For the best performance, ensure you're using a recent PyTorch version that includes optimized MPS support.
+    </Tip>
+  </Tab>
+
+  <Tab title="CPU only">
+    If you don't have a GPU, you can still run nanoGPT on CPU:
+
+    ```bash
+    pip install torch numpy transformers datasets tiktoken wandb tqdm
+    ```
+
+    When training, disable compilation and use CPU device:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --device=cpu --compile=False
+    ```
+
+    <Warning>
+      CPU training is significantly slower than GPU training. Consider using smaller model configurations or cloud GPU instances for serious training runs.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Verify installation
+
+Verify that PyTorch is installed correctly and can detect your GPU (if available):
+
+```python
+import torch
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    print(f"CUDA version: {torch.version.cuda}")
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+```
+
+Expected output with GPU:
+
+```
+PyTorch version: 2.1.0
+CUDA available: True
+CUDA version: 12.1
+GPU: NVIDIA A100-SXM4-40GB
+```
+
+## Optional: Set up Weights & Biases
+
+If you want to track training metrics with Weights & Biases:
+
+<Steps>
+  <Step title="Create a W&B account">
+    Sign up at [wandb.ai](https://wandb.ai) if you don't have an account.
+  </Step>
+  
+  <Step title="Log in via CLI">
+    Run the following command and paste your API key when prompted:
+
+    ```bash
+    wandb login
+    ```
+  </Step>
+  
+  <Step title="Enable logging in config">
+    Set `wandb_log=True` in your config file or pass it as a command-line argument:
+
+    ```bash
+    python train.py config/train_shakespeare_char.py --wandb_log=True
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  Weights & Biases is completely optional. You can train models without it by keeping `wandb_log=False` (the default).
+</Note>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="torch.compile() errors on Windows">
+    PyTorch 2.0's `torch.compile()` is not fully supported on Windows. Disable it with:
+
+    ```bash
+    python train.py --compile=False
+    ```
+
+    This will slow down training but ensure compatibility.
+  </Accordion>
+
+  <Accordion title="Out of memory errors">
+    If you encounter CUDA out of memory errors, try:
+    - Reducing `batch_size`
+    - Reducing `block_size` (context length)
+    - Using a smaller model (fewer `n_layer`, smaller `n_embd`)
+    - Enabling gradient accumulation with `gradient_accumulation_steps`
+  </Accordion>
+
+  <Accordion title="Slow training on GPU">
+    Ensure that:
+    - PyTorch 2.0+ is installed
+    - `torch.compile()` is enabled (default)
+    - You're using mixed precision (bfloat16 or float16)
+    - Flash Attention is available (PyTorch 2.0+)
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<Card title="Quickstart" icon="rocket" href="/quickstart">
+  Ready to train your first model? Follow the quickstart guide to train a GPT on Shakespeare in minutes.
+</Card>

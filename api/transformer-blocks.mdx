@@ -1,0 +1,179 @@
+---
+title: Transformer blocks
+description: Core transformer components including Block, MLP, and LayerNorm classes
+---
+
+The transformer architecture consists of stacked blocks, each containing attention and feedforward layers with layer normalization.
+
+## Block
+
+The `Block` class represents a single transformer block with pre-normalization architecture.
+
+### Class definition
+
+```python
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
+        return x
+```
+
+Location: `model.py:94-106`
+
+### Parameters
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object containing model hyperparameters.
+</ParamField>
+
+### Components
+
+<ResponseField name="ln_1" type="LayerNorm">
+  First layer normalization applied before the attention layer.
+</ResponseField>
+
+<ResponseField name="attn" type="CausalSelfAttention">
+  Multi-head causal self-attention mechanism.
+</ResponseField>
+
+<ResponseField name="ln_2" type="LayerNorm">
+  Second layer normalization applied before the MLP layer.
+</ResponseField>
+
+<ResponseField name="mlp" type="MLP">
+  Feedforward network applied after attention.
+</ResponseField>
+
+### Architecture
+
+The Block implements pre-normalization with residual connections:
+
+1. Apply LayerNorm to input
+2. Apply attention
+3. Add residual connection
+4. Apply LayerNorm
+5. Apply MLP
+6. Add residual connection
+
+<Note>
+  This uses pre-normalization (LayerNorm before the sublayer) rather than post-normalization, which tends to be more stable for training.
+</Note>
+
+## MLP
+
+The `MLP` class is a two-layer feedforward network with GELU activation.
+
+### Class definition
+
+```python
+class MLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu    = nn.GELU()
+        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
+```
+
+Location: `model.py:78-92`
+
+### Parameters
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object containing model hyperparameters.
+</ParamField>
+
+### Components
+
+<ResponseField name="c_fc" type="nn.Linear">
+  First linear layer that expands dimensionality from `n_embd` to `4 * n_embd`.
+</ResponseField>
+
+<ResponseField name="gelu" type="nn.GELU">
+  Gaussian Error Linear Unit activation function.
+</ResponseField>
+
+<ResponseField name="c_proj" type="nn.Linear">
+  Second linear layer that projects back down from `4 * n_embd` to `n_embd`.
+</ResponseField>
+
+<ResponseField name="dropout" type="nn.Dropout">
+  Dropout layer applied to the output.
+</ResponseField>
+
+### Architecture
+
+The MLP follows the standard transformer feedforward network design:
+
+```
+input (n_embd) → Linear → GELU → Linear → Dropout → output (n_embd)
+                (4*n_embd)       (n_embd)
+```
+
+<Note>
+  The hidden dimension is 4x the embedding dimension, which is standard in transformer architectures.
+</Note>
+
+## LayerNorm
+
+Custom LayerNorm implementation with optional bias parameter.
+
+### Class definition
+
+```python
+class LayerNorm(nn.Module):
+    """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
+
+    def __init__(self, ndim, bias):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+
+    def forward(self, input):
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+```
+
+Location: `model.py:18-27`
+
+### Parameters
+
+<ParamField path="ndim" type="int" required>
+  Dimensionality to normalize over (typically `config.n_embd`).
+</ParamField>
+
+<ParamField path="bias" type="bool" required>
+  Whether to include a learnable bias parameter. PyTorch's standard LayerNorm doesn't support `bias=False`.
+</ParamField>
+
+### Components
+
+<ResponseField name="weight" type="nn.Parameter">
+  Learnable scale parameter initialized to ones with shape `(ndim,)`.
+</ResponseField>
+
+<ResponseField name="bias" type="nn.Parameter | None">
+  Optional learnable bias parameter initialized to zeros with shape `(ndim,)`. Set to `None` if `bias=False`.
+</ResponseField>
+
+### Why custom LayerNorm?
+
+PyTorch's built-in `nn.LayerNorm` doesn't support disabling the bias parameter. This implementation allows you to set `bias=False` in the config for potentially better performance.
+
+<Note>
+  The epsilon value is fixed at `1e-5` for numerical stability during normalization.
+</Note>

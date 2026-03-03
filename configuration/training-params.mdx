@@ -1,0 +1,430 @@
+---
+title: Training parameters
+description: Complete reference for all training configuration parameters in nanoGPT
+---
+
+## Overview
+
+This page documents all configuration parameters available in `train.py`. Default values are designed to train GPT-2 (124M parameters) on OpenWebText.
+
+<Note>
+All parameters can be overridden via config files or command-line arguments. See the [configuration overview](/configuration/overview) for usage details.
+</Note>
+
+## I/O parameters
+
+Control where outputs are saved and how often evaluations run.
+
+<ParamField path="out_dir" type="str" default="'out'">
+  Directory where checkpoints and logs are saved. Created automatically if it doesn't exist.
+  
+  ```python
+  out_dir = 'out-shakespeare-char'
+  ```
+</ParamField>
+
+<ParamField path="eval_interval" type="int" default="2000">
+  Number of training iterations between evaluations. At each interval, the model evaluates on train/val sets and saves checkpoints.
+  
+  ```python
+  eval_interval = 250  # Evaluate more frequently for small datasets
+  ```
+</ParamField>
+
+<ParamField path="log_interval" type="int" default="1">
+  Number of iterations between logging loss and timing statistics to console.
+  
+  ```python
+  log_interval = 10  # Log every 10 iterations
+  ```
+</ParamField>
+
+<ParamField path="eval_iters" type="int" default="200">
+  Number of batches to use when estimating train/val loss during evaluation. Higher values give more accurate estimates but take longer.
+  
+  ```python
+  eval_iters = 40  # Faster evaluation for finetuning
+  ```
+</ParamField>
+
+<ParamField path="eval_only" type="bool" default="False">
+  If `True`, the script exits immediately after the first evaluation. Useful for running evaluations without training.
+  
+  ```python
+  eval_only = True  # Just evaluate, don't train
+  ```
+</ParamField>
+
+<ParamField path="always_save_checkpoint" type="bool" default="True">
+  If `True`, saves a checkpoint after every evaluation interval. If `False`, only saves when validation loss improves.
+  
+  ```python
+  always_save_checkpoint = False  # Only save best checkpoints
+  ```
+</ParamField>
+
+<ParamField path="init_from" type="str" default="'scratch'">
+  How to initialize the model. Options:
+  - `'scratch'` - Random initialization
+  - `'resume'` - Load from `{out_dir}/ckpt.pt`
+  - `'gpt2'` - Load OpenAI GPT-2 124M weights
+  - `'gpt2-medium'` - Load GPT-2 350M
+  - `'gpt2-large'` - Load GPT-2 774M
+  - `'gpt2-xl'` - Load GPT-2 1.5B
+  
+  ```python
+  init_from = 'gpt2-xl'  # Finetune from largest GPT-2
+  ```
+</ParamField>
+
+## Weights & Biases logging
+
+Integration with Weights & Biases for experiment tracking.
+
+<ParamField path="wandb_log" type="bool" default="False">
+  Enable logging to Weights & Biases. Requires `wandb` package installed.
+  
+  ```python
+  wandb_log = True  # Enable W&B logging
+  ```
+</ParamField>
+
+<ParamField path="wandb_project" type="str" default="'owt'">
+  W&B project name where runs are logged.
+  
+  ```python
+  wandb_project = 'shakespeare-char'
+  ```
+</ParamField>
+
+<ParamField path="wandb_run_name" type="str" default="'gpt2'">
+  Name for this specific W&B run. Use dynamic names for unique identification.
+  
+  ```python
+  import time
+  wandb_run_name = 'gpt2-' + str(time.time())
+  ```
+</ParamField>
+
+## Data parameters
+
+Configure dataset loading and batch processing.
+
+<ParamField path="dataset" type="str" default="'openwebtext'">
+  Dataset name. Should match a directory in `data/` containing `train.bin` and `val.bin` files.
+  
+  ```python
+  dataset = 'shakespeare_char'
+  ```
+</ParamField>
+
+<ParamField path="gradient_accumulation_steps" type="int" default="40">
+  Number of forward/backward passes before updating weights. Simulates larger batch sizes.
+  
+  **Effective batch size** = `batch_size` × `gradient_accumulation_steps` × `num_gpus`
+  
+  ```python
+  gradient_accumulation_steps = 5 * 8  # For 8 GPUs
+  ```
+  
+  <Warning>
+  In DDP mode, this value is automatically divided by world size (`train.py:95`).
+  </Warning>
+</ParamField>
+
+<ParamField path="batch_size" type="int" default="12">
+  Micro-batch size per GPU. This is the number of sequences processed in one forward pass.
+  
+  ```python
+  batch_size = 64  # Small model, can fit larger batches
+  ```
+</ParamField>
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length (context window) in tokens. Must be ≤ model's `block_size`.
+  
+  ```python
+  block_size = 256  # Shorter context for faster training
+  ```
+</ParamField>
+
+## Model parameters
+
+Define the transformer architecture. See [model parameters](/configuration/model-params) for detailed explanations.
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks. GPT-2 uses 12 (124M), 24 (350M), 36 (774M), or 48 (1.5B).
+  
+  ```python
+  n_layer = 6  # Smaller model for debugging
+  ```
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads per block. Must divide `n_embd` evenly.
+  
+  ```python
+  n_head = 6  # Matches smaller n_embd
+  ```
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension. GPT-2 base uses 768.
+  
+  ```python
+  n_embd = 384  # Half size for baby GPT
+  ```
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability. Use 0.0 for pretraining, 0.1+ for finetuning to prevent overfitting.
+  
+  ```python
+  dropout = 0.2  # Regularization for small datasets
+  ```
+</ParamField>
+
+<ParamField path="bias" type="bool" default="False">
+  Whether to use bias in Linear and LayerNorm layers. `False` is slightly faster and better.
+  
+  ```python
+  bias = True  # Required when loading OpenAI GPT-2 checkpoints
+  ```
+</ParamField>
+
+## AdamW optimizer
+
+Parameters for the AdamW optimizer.
+
+<ParamField path="learning_rate" type="float" default="6e-4">
+  Maximum learning rate. This is the peak LR after warmup (if decay is enabled).
+  
+  ```python
+  learning_rate = 1e-3  # Higher LR for small models
+  ```
+</ParamField>
+
+<ParamField path="max_iters" type="int" default="600000">
+  Total number of training iterations. Training stops when `iter_num > max_iters`.
+  
+  ```python
+  max_iters = 5000  # Quick training for small datasets
+  ```
+</ParamField>
+
+<ParamField path="weight_decay" type="float" default="1e-1">
+  L2 regularization coefficient. Applied only to 2D parameters (weights, not biases or norms).
+  
+  ```python
+  weight_decay = 1e-1  # Standard value
+  ```
+</ParamField>
+
+<ParamField path="beta1" type="float" default="0.9">
+  Adam beta1 parameter (exponential decay rate for first moment estimates).
+  
+  ```python
+  beta1 = 0.9  # Standard value
+  ```
+</ParamField>
+
+<ParamField path="beta2" type="float" default="0.95">
+  Adam beta2 parameter (exponential decay rate for second moment estimates).
+  
+  ```python
+  beta2 = 0.99  # Higher for small batch sizes
+  ```
+</ParamField>
+
+<ParamField path="grad_clip" type="float" default="1.0">
+  Gradient clipping value. Clips gradients to this max norm. Set to `0.0` to disable.
+  
+  ```python
+  grad_clip = 1.0  # Prevent gradient explosion
+  ```
+</ParamField>
+
+## Learning rate decay
+
+Cosine learning rate schedule with warmup.
+
+<ParamField path="decay_lr" type="bool" default="True">
+  Whether to use learning rate decay. If `False`, uses constant `learning_rate`.
+  
+  ```python
+  decay_lr = False  # Constant LR for finetuning
+  ```
+</ParamField>
+
+<ParamField path="warmup_iters" type="int" default="2000">
+  Number of iterations for linear warmup from 0 to `learning_rate`.
+  
+  ```python
+  warmup_iters = 100  # Quick warmup for small models
+  ```
+</ParamField>
+
+<ParamField path="lr_decay_iters" type="int" default="600000">
+  Iterations over which to decay from `learning_rate` to `min_lr` using cosine schedule.
+  
+  Per Chinchilla paper, should equal `max_iters`.
+  
+  ```python
+  lr_decay_iters = 5000  # Match max_iters
+  ```
+</ParamField>
+
+<ParamField path="min_lr" type="float" default="6e-5">
+  Minimum learning rate at end of decay. Per Chinchilla, should be ~`learning_rate / 10`.
+  
+  ```python
+  min_lr = 1e-4  # 1/10 of learning_rate
+  ```
+</ParamField>
+
+## Distributed training
+
+Distributed Data Parallel (DDP) settings.
+
+<ParamField path="backend" type="str" default="'nccl'">
+  DDP backend. Options:
+  - `'nccl'` - NVIDIA GPUs (recommended)
+  - `'gloo'` - CPU or cross-platform
+  - `'mpi'` - MPI-based
+  
+  ```python
+  backend = 'gloo'  # For CPU clusters
+  ```
+</ParamField>
+
+## System parameters
+
+Hardware and compilation settings.
+
+<ParamField path="device" type="str" default="'cuda'">
+  Device to train on. Options:
+  - `'cuda'` - First available GPU
+  - `'cuda:0'`, `'cuda:1'`, etc. - Specific GPU
+  - `'cpu'` - CPU only
+  - `'mps'` - Apple Silicon GPU
+  
+  ```python
+  device = 'cpu'  # For MacBooks without CUDA
+  ```
+</ParamField>
+
+<ParamField path="dtype" type="str" default="'bfloat16' if supported else 'float16'">
+  Training precision. Options:
+  - `'float32'` - Full precision (slower, more memory)
+  - `'bfloat16'` - Best for A100/H100 GPUs
+  - `'float16'` - Good for older GPUs (uses GradScaler)
+  
+  ```python
+  dtype = 'float32'  # Maximum precision
+  ```
+  
+  <Note>
+  Default automatically selects `'bfloat16'` if your GPU supports it, otherwise `'float16'`.
+  </Note>
+</ParamField>
+
+<ParamField path="compile" type="bool" default="True">
+  Whether to use PyTorch 2.0+ `torch.compile()` for faster training. Requires PyTorch 2.0+.
+  
+  ```python
+  compile = False  # Disable for debugging or PyTorch < 2.0
+  ```
+  
+  <Tip>
+  Compilation takes ~1 minute on first run but provides significant speedups.
+  </Tip>
+</ParamField>
+
+## Configuration examples
+
+<Tabs>
+  <Tab title="Small model (debugging)">
+    ```python config/debug.py
+    # Quick training run for debugging
+    out_dir = 'out-debug'
+    eval_interval = 100
+    eval_iters = 20
+    log_interval = 1
+    
+    batch_size = 8
+    block_size = 256
+    
+    n_layer = 4
+    n_head = 4
+    n_embd = 256
+    
+    max_iters = 1000
+    learning_rate = 1e-3
+    
+    compile = False  # Faster startup
+    ```
+  </Tab>
+  
+  <Tab title="Finetuning">
+    ```python config/finetune.py
+    # Finetune GPT-2 on custom dataset
+    init_from = 'gpt2'
+    out_dir = 'out-finetune'
+    
+    dataset = 'my_dataset'
+    batch_size = 4
+    gradient_accumulation_steps = 32
+    
+    # Small number of iterations
+    max_iters = 100
+    eval_interval = 10
+    
+    # Constant, low learning rate
+    learning_rate = 3e-5
+    decay_lr = False
+    
+    # Regularization to prevent overfitting
+    dropout = 0.1
+    
+    # Only save best checkpoints
+    always_save_checkpoint = False
+    ```
+  </Tab>
+  
+  <Tab title="Full-scale training">
+    ```python config/train_large.py
+    # Train GPT-2 on 8x A100 GPUs
+    wandb_log = True
+    wandb_project = 'my-project'
+    wandb_run_name = 'gpt2-124M'
+    
+    # Batch size: 12 * 1024 * 40 * 8 = ~4M tokens/iter
+    batch_size = 12
+    block_size = 1024
+    gradient_accumulation_steps = 5 * 8
+    
+    # 300B tokens total
+    max_iters = 600000
+    lr_decay_iters = 600000
+    
+    # Standard GPT-2 settings
+    learning_rate = 6e-4
+    min_lr = 6e-5
+    warmup_iters = 2000
+    
+    eval_interval = 1000
+    ```
+  </Tab>
+</Tabs>
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Configuration overview" href="/configuration/overview" icon="book">
+    Learn how the configurator system works
+  </Card>
+  
+  <Card title="Model parameters" href="/configuration/model-params" icon="brain">
+    Understand model architecture settings
+  </Card>
+</CardGroup>

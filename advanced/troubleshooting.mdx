@@ -1,0 +1,460 @@
+---
+title: Troubleshooting
+description: Common issues and solutions when training nanoGPT models
+---
+
+This guide covers common issues you may encounter when using nanoGPT and how to resolve them.
+
+## PyTorch 2.0 compile issues
+
+The most common issue is related to PyTorch 2.0's `torch.compile()` feature.
+
+### Compile not available
+
+<Warning>
+From README.md:224: "Note that by default this repo uses PyTorch 2.0 (i.e. `torch.compile`). This is fairly new and experimental, and not yet available on all platforms (e.g. Windows)."
+</Warning>
+
+**Problem**: Training fails with compile-related errors
+
+**Solution**: Disable compile mode:
+
+```bash
+python train.py --compile=False
+```
+
+This will slow down the code but ensures it runs on all platforms.
+
+### Platform compatibility
+
+**Affected platforms**:
+- Windows (limited support)
+- Older Linux distributions
+- Some cloud environments
+
+**Recommendation**: Use PyTorch nightly builds for best compatibility:
+
+```bash
+pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu118
+```
+
+<Note>
+Select the appropriate PyTorch version at https://pytorch.org/get-started/locally/
+</Note>
+
+## Flash Attention warnings
+
+### WARNING: using slow attention
+
+**Problem**: You see this warning during training:
+```
+WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0
+```
+
+**Impact**: Training will be slower but still functional
+
+**Solution**: Upgrade to PyTorch 2.0 or later:
+
+```bash
+pip install --upgrade torch
+```
+
+From model.py:44-47, Flash Attention is automatically enabled when available:
+```python
+self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+if not self.flash:
+    print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
+```
+
+## Out of memory errors
+
+### CUDA out of memory
+
+**Problem**: Training crashes with `CUDA out of memory` error
+
+**Solutions** (try in order):
+
+<Accordion title="1. Reduce batch size">
+
+Decrease the batch size to use less GPU memory:
+
+```bash
+python train.py --batch_size=8  # default is 12
+```
+
+Or even smaller:
+```bash
+python train.py --batch_size=4
+```
+
+</Accordion>
+
+<Accordion title="2. Reduce block size (context length)">
+
+Memory usage scales quadratically with sequence length:
+
+```bash
+python train.py --block_size=512  # default is 1024
+```
+
+Or smaller:
+```bash
+python train.py --block_size=256
+```
+
+</Accordion>
+
+<Accordion title="3. Reduce model size">
+
+Train a smaller model:
+
+```bash
+python train.py --n_layer=6 --n_head=6 --n_embd=384
+```
+
+From README.md:166, available GPT-2 model sizes:
+- `gpt2` (124M) - default
+- `gpt2-medium` (350M)
+- `gpt2-large` (774M)  
+- `gpt2-xl` (1558M)
+
+</Accordion>
+
+<Accordion title="4. Use gradient accumulation">
+
+Simulate larger batch sizes without using more memory:
+
+```bash
+python train.py --batch_size=4 --gradient_accumulation_steps=3
+```
+
+This gives an effective batch size of 4 × 3 = 12.
+
+</Accordion>
+
+<Accordion title="5. Use float16 instead of bfloat16">
+
+On GPUs without bfloat16 support, this is automatic. To force float16:
+
+```bash
+python train.py --dtype=float16
+```
+
+</Accordion>
+
+## CPU/MPS training issues
+
+### Training on CPU
+
+**Problem**: Need to train on CPU-only system
+
+**Solution**: Adjust settings for CPU training from README.md:82-88:
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --device=cpu \
+    --compile=False \
+    --eval_iters=20 \
+    --log_interval=1 \
+    --block_size=64 \
+    --batch_size=12 \
+    --n_layer=4 \
+    --n_head=4 \
+    --n_embd=128 \
+    --max_iters=2000 \
+    --lr_decay_iters=2000 \
+    --dropout=0.0
+```
+
+<Warning>
+You must set both `--device=cpu` AND `--compile=False` for CPU training.
+</Warning>
+
+### Apple Silicon (M1/M2/M3) Macs
+
+**Problem**: Training on Apple Silicon
+
+**Solution**: Use the MPS (Metal Performance Shaders) backend from README.md:105:
+
+```bash
+python train.py --device=mps
+```
+
+<Tip>
+MPS can provide 2-3x speedup compared to CPU on Apple Silicon Macs. See [Issue 28](https://github.com/karpathy/nanoGPT/issues/28) for more details.
+</Tip>
+
+## Multi-node training issues
+
+### Slow multi-node training
+
+**Problem**: Multi-node training is extremely slow
+
+**Cause**: Missing or slow network interconnect
+
+**Solution**: From README.md:132:
+
+Benchmark your interconnect:
+```bash
+iperf3 -s  # on one node
+iperf3 -c <node_ip>  # on another node
+```
+
+If you don't have Infiniband, disable IB:
+```bash
+NCCL_IB_DISABLE=1 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+    --master_addr=123.456.123.456 --master_port=1234 train.py
+```
+
+<Warning>
+Without Infiniband, multi-node training will work but most likely crawl.
+</Warning>
+
+## Data loading issues
+
+### Data files not found
+
+**Problem**: Error about missing `train.bin` or `val.bin`
+
+**Solution**: Prepare the dataset first:
+
+For Shakespeare:
+```bash
+python data/shakespeare_char/prepare.py
+```
+
+For OpenWebText:
+```bash
+python data/openwebtext/prepare.py
+```
+
+### Memory leak with data loading
+
+**Problem**: Memory usage grows over time
+
+**Solution**: The code already handles this from train.py:117-122:
+
+```python
+def get_batch(split):
+    # We recreate np.memmap every batch to avoid a memory leak, as per
+    # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+    if split == 'train':
+        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
+```
+
+If you modified this code, ensure you recreate the memmap each batch.
+
+## Checkpointing issues
+
+### Checkpoint loading errors
+
+**Problem**: Error when resuming from checkpoint with `_orig_mod.` prefix
+
+**Solution**: This is handled automatically in train.py:174-177:
+
+```python
+unwanted_prefix = '_orig_mod.'
+for k,v in list(state_dict.items()):
+    if k.startswith(unwanted_prefix):
+        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+```
+
+### Incompatible checkpoint
+
+**Problem**: Can't resume training from checkpoint
+
+**Cause**: Model architecture mismatch
+
+**Check**: The checkpoint enforces matching architecture from train.py:166-167:
+
+```python
+for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
+    model_args[k] = checkpoint_model_args[k]
+```
+
+**Solution**: Ensure you're using the same model configuration, or start training from scratch.
+
+## Sampling/Inference issues
+
+### Sampling fails or produces bad output
+
+**Problem**: `sample.py` produces errors or nonsensical text
+
+**Solutions**:
+
+<Accordion title="Wrong output directory">
+
+Ensure you're pointing to the correct checkpoint:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+</Accordion>
+
+<Accordion title="Insufficient training">
+
+The model may not be trained enough. Check training loss:
+- Shakespeare char-level: aim for loss < 1.5
+- Shakespeare with GPT-2: aim for loss < 1.0
+
+</Accordion>
+
+<Accordion title="Temperature too high/low">
+
+Adjust sampling temperature (default 1.0):
+
+```bash
+# More conservative
+python sample.py --temperature=0.8
+
+# More creative
+python sample.py --temperature=1.2
+```
+
+</Accordion>
+
+## Performance issues
+
+### Training is slower than expected
+
+**Checklist**:
+
+1. **Compile enabled?**
+   ```bash
+   python train.py --compile=True  # should be default
+   ```
+
+2. **Using appropriate dtype?**
+   ```bash
+   # For A100/H100
+   python train.py --dtype=bfloat16
+   
+   # For other GPUs
+   python train.py --dtype=float16
+   ```
+
+3. **Flash Attention available?**
+   Check for the warning about slow attention and upgrade PyTorch if needed.
+
+4. **GPU utilization**
+   Monitor with:
+   ```bash
+   nvidia-smi -l 1
+   ```
+   GPU utilization should be >80%.
+
+### Low MFU (Model FLOPs Utilization)
+
+**Problem**: MFU is less than 40%
+
+**Potential causes and solutions**:
+
+<Accordion title="Small batch size">
+
+Increase batch size to improve GPU utilization:
+
+```bash
+python train.py --batch_size=16  # if memory allows
+```
+
+</Accordion>
+
+<Accordion title="Data loading bottleneck">
+
+Ensure data is on fast storage (NVMe SSD, not network drive).
+
+The code already uses async data loading from train.py:302-303:
+```python
+# immediately async prefetch next batch while model is doing the forward pass
+X, Y = get_batch('train')
+```
+
+</Accordion>
+
+<Accordion title="Compile not enabled">
+
+Ensure `--compile=True` (default).
+
+</Accordion>
+
+## Loss not decreasing
+
+### Loss is NaN
+
+**Problem**: Training loss becomes NaN
+
+**Common causes**:
+
+1. **Learning rate too high**
+   ```bash
+   python train.py --learning_rate=3e-4  # reduce from default 6e-4
+   ```
+
+2. **Mixed precision instability**
+   ```bash
+   python train.py --dtype=float32  # more stable but slower
+   ```
+
+3. **Gradient clipping disabled**
+   Ensure gradient clipping is enabled (default `grad_clip=1.0`)
+
+### Loss not improving
+
+**Problem**: Loss plateaus too high
+
+**Solutions**:
+
+1. **Insufficient training**
+   - Check you're running enough iterations
+   - For GPT-2 124M: aim for 600k iterations
+
+2. **Learning rate decay**
+   - Ensure `--decay_lr=True` (default)
+   - Check `lr_decay_iters` matches `max_iters`
+
+3. **Data issues**
+   - Verify dataset prepared correctly
+   - Check data files aren't corrupted
+
+## Logging and monitoring
+
+### Weights & Biases (wandb) issues
+
+**Problem**: wandb logging not working
+
+**Solution**: Enable wandb logging:
+
+```bash
+python train.py --wandb_log=True --wandb_project=my_project --wandb_run_name=my_run
+```
+
+Ensure wandb is installed and configured:
+```bash
+pip install wandb
+wandb login
+```
+
+## Getting help
+
+If you're still experiencing issues:
+
+1. **Check the GitHub issues**: Many common problems are already documented
+   - [nanoGPT Issues](https://github.com/karpathy/nanoGPT/issues)
+
+2. **Watch the educational video**: From README.md:226-227
+   - [Zero To Hero series](https://karpathy.ai/zero-to-hero.html)
+   - [GPT video](https://www.youtube.com/watch?v=kCc8FmEb1nY)
+
+3. **Join the Discord**: From README.md:228-230
+   - #nanoGPT channel on Discord
+   - https://discord.gg/3zy8kqD9Cp
+
+<Tip>
+When asking for help, include:
+- Your exact command
+- Full error message
+- PyTorch version (`python -c "import torch; print(torch.__version__)"`)
+- GPU model (if applicable)
+- OS and platform details
+</Tip>

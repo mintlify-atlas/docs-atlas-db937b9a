@@ -1,0 +1,296 @@
+---
+title: Reproducing GPT-2
+description: Train GPT-2 (124M) on OpenWebText with distributed data parallel
+---
+
+This guide shows you how to reproduce GPT-2 (124M parameters) training results using the OpenWebText dataset. The training achieves a validation loss of ~2.85 in about 4 days on an 8x A100 40GB node.
+
+## Prepare the dataset
+
+First, download and tokenize the OpenWebText dataset:
+
+```bash
+python data/openwebtext/prepare.py
+```
+
+<Note>
+  This downloads the [OpenWebText dataset](https://huggingface.co/datasets/openwebtext), an open reproduction of OpenAI's private WebText dataset, and tokenizes it using GPT-2 BPE encoding.
+</Note>
+
+### Dataset statistics
+
+After preparation, you'll have:
+
+- `train.bin`: ~17GB, ~9B tokens (9,035,582,198)
+- `val.bin`: ~8.5MB, ~4M tokens (4,434,897)
+- Split: 8,009,762 training documents, 4,007 validation documents
+
+The dataset is stored as raw `uint16` bytes containing GPT-2 BPE token IDs.
+
+## Training GPT-2 (124M)
+
+To reproduce GPT-2 with 124M parameters, you need at least an 8x A100 40GB node:
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+```
+
+### Training configuration
+
+The `config/train_gpt2.py` file contains the hyperparameters:
+
+```python
+# Batch size configuration
+batch_size = 12
+block_size = 1024
+gradient_accumulation_steps = 5 * 8  # 40 steps
+
+# Total batch size: ~0.5M tokens
+# 12 batch_size * 1024 block_size * 40 gradaccum * 8 GPUs = 491,520 tokens/iter
+
+# Training duration
+max_iters = 600000
+lr_decay_iters = 600000
+# Total tokens: 300B
+
+# Evaluation
+eval_interval = 1000
+eval_iters = 200
+log_interval = 10
+
+# Optimization
+weight_decay = 1e-1
+```
+
+### Model architecture
+
+From `train.py` defaults:
+
+```python
+n_layer = 12
+n_head = 12
+n_embd = 768
+dropout = 0.0  # No dropout for pretraining
+bias = False
+
+# Optimizer
+learning_rate = 6e-4
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+
+# Learning rate schedule
+warmup_iters = 2000
+min_lr = 6e-5  # learning_rate / 10
+```
+
+### Expected results
+
+- **Training time**: ~4 days on 8x A100 40GB
+- **Final validation loss**: ~2.85
+- **Tokens per iteration**: 491,520
+- **Total tokens trained**: ~300 billion
+
+<Note>
+  GPT-2 (124M) evaluated directly on OpenWebText gets a validation loss of ~3.11, but finetuning brings it down to ~2.85. This indicates a domain gap between OpenWebText and the original (closed) WebText dataset.
+</Note>
+
+## Distributed training
+
+### Single node, multiple GPUs
+
+The `torchrun` command automatically sets up PyTorch Distributed Data Parallel (DDP):
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+```
+
+<Steps>
+  <Step title="DDP initialization">
+    From `train.py:82-95`, DDP is automatically detected and initialized:
+
+    ```python
+    ddp = int(os.environ.get('RANK', -1)) != -1
+    if ddp:
+        init_process_group(backend='nccl')
+        ddp_rank = int(os.environ['RANK'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        device = f'cuda:{ddp_local_rank}'
+        torch.cuda.set_device(device)
+        master_process = ddp_rank == 0
+    ```
+  </Step>
+
+  <Step title="Gradient accumulation scaling">
+    Gradient accumulation steps are divided by world size:
+
+    ```python
+    gradient_accumulation_steps //= ddp_world_size
+    ```
+  </Step>
+
+  <Step title="Model wrapping">
+    The model is wrapped with DDP at `train.py:210-212`:
+
+    ```python
+    if ddp:
+        model = DDP(model, device_ids=[ddp_local_rank])
+    ```
+  </Step>
+</Steps>
+
+### Multi-node training
+
+For training across multiple nodes with Infiniband interconnect:
+
+```bash
+# Run on the first (master) node with IP 123.456.123.456:
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=0 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+
+# Run on the worker node:
+torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 \
+  --master_addr=123.456.123.456 --master_port=1234 train.py
+```
+
+<Warning>
+  If you don't have Infiniband, prepend `NCCL_IB_DISABLE=1` to the commands above. Training will work but will be significantly slower.
+</Warning>
+
+### Benchmark your interconnect
+
+Before running multi-node training, test your network speed:
+
+```bash
+# On master node:
+iperf3 -s
+
+# On worker node:
+iperf3 -c 123.456.123.456
+```
+
+## Baseline comparisons
+
+OpenAI GPT-2 checkpoints provide baselines for OpenWebText:
+
+| Model | Parameters | Train Loss | Val Loss |
+|-------|-----------|-----------|----------|
+| gpt2 | 124M | 3.11 | 3.12 |
+| gpt2-medium | 350M | 2.85 | 2.84 |
+| gpt2-large | 774M | 2.66 | 2.67 |
+| gpt2-xl | 1558M | 2.56 | 2.54 |
+
+Evaluate these baselines yourself:
+
+```bash
+python train.py config/eval_gpt2.py
+python train.py config/eval_gpt2_medium.py
+python train.py config/eval_gpt2_large.py
+python train.py config/eval_gpt2_xl.py
+```
+
+<Note>
+  The domain gap between WebText (closed) and OpenWebText means a direct GPT-2 (124M) evaluation gives 3.11 validation loss. After finetuning on OpenWebText, it reaches ~2.85, matching our reproduction target.
+</Note>
+
+## Performance optimizations
+
+### PyTorch 2.0 compile
+
+By default, nanoGPT uses `torch.compile()` for significant speedups:
+
+```python
+if compile:
+    print("compiling the model... (takes a ~minute)")
+    model = torch.compile(model)
+```
+
+This reduces iteration time from ~250ms to ~135ms.
+
+<Warning>
+  If you encounter issues with `torch.compile()`, disable it with `--compile=False`. This will slow down training but ensure compatibility.
+</Warning>
+
+### Mixed precision training
+
+Automatic mixed precision is enabled by default:
+
+```python
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16'
+```
+
+The training loop uses gradient scaling for fp16:
+
+```python
+scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+
+# Training step
+with torch.amp.autocast(device_type='cuda', dtype=ptdtype):
+    logits, loss = model(X, Y)
+
+scaler.scale(loss).backward()
+scaler.step(optimizer)
+scaler.update()
+```
+
+### Efficient data loading
+
+The "poor man's data loader" from `train.py:114-131` uses memory-mapped files:
+
+```python
+def get_batch(split):
+    # Recreate memmap every batch to avoid memory leak
+    data = np.memmap(os.path.join(data_dir, f'{split}.bin'), 
+                     dtype=np.uint16, mode='r')
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) 
+                     for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) 
+                     for i in ix])
+    
+    if device_type == 'cuda':
+        # Asynchronous GPU transfer
+        x = x.pin_memory().to(device, non_blocking=True)
+        y = y.pin_memory().to(device, non_blocking=True)
+    return x, y
+```
+
+## Monitor training progress
+
+Enable Weights & Biases logging:
+
+```bash
+torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py --wandb_log=True
+```
+
+The training loop logs:
+- Training and validation loss
+- Learning rate
+- Model FLOPs Utilization (MFU)
+- Iteration time
+
+## Sample from the model
+
+After training, generate samples:
+
+```bash
+python sample.py
+```
+
+Or sample from a specific checkpoint:
+
+```bash
+python sample.py --out_dir=out --start="Once upon a time"
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Distributed training" icon="network-wired" href="/training/distributed-training">
+    Deep dive into DDP setup and multi-node training
+  </Card>
+  <Card title="Finetuning" icon="wrench" href="/training/finetuning">
+    Finetune your trained model on custom datasets
+  </Card>
+</CardGroup>

@@ -1,0 +1,108 @@
+---
+title: Introduction
+description: Learn about nanoGPT, a simple and fast repository for training and finetuning GPT language models
+---
+
+The simplest, fastest repository for training and finetuning medium-sized GPTs. nanoGPT prioritizes simplicity and speed while maintaining the ability to reproduce GPT-2 results.
+
+## What is nanoGPT?
+
+nanoGPT is a minimal implementation of GPT (Generative Pre-trained Transformer) that you can use to:
+
+<CardGroup cols={2}>
+  <Card title="Train from scratch" icon="sparkles">
+    Build and train your own GPT models on custom datasets
+  </Card>
+  <Card title="Finetune pretrained models" icon="wrench">
+    Adapt GPT-2 checkpoints to your specific use case
+  </Card>
+  <Card title="Reproduce GPT-2" icon="clone">
+    Recreate OpenAI's GPT-2 (124M) on OpenWebText
+  </Card>
+  <Card title="Experiment quickly" icon="flask">
+    Hackable codebase with just ~600 lines of core code
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+nanoGPT consists of two main files that contain all the essential functionality:
+
+### model.py (~300 lines)
+
+Defines the GPT model architecture with these key components:
+
+- **Transformer blocks**: Causal self-attention and feed-forward layers
+- **GPTConfig**: Configuration dataclass for model hyperparameters
+- **GPT class**: Main model with training and generation methods
+
+```python model.py
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+### train.py (~300 lines)
+
+A clean training loop with:
+
+- **Distributed training**: PyTorch DDP support for multi-GPU setups
+- **Mixed precision**: Automatic FP16/BF16 training
+- **Configuration system**: Override defaults via command line or config files
+- **Checkpoint management**: Automatic saving and resuming
+
+## Key features
+
+<AccordionGroup>
+  <Accordion title="Simple and readable code">
+    The entire codebase is intentionally minimal. The core training loop (`train.py`) and model definition (`model.py`) are each around 300 lines, making the code easy to understand and modify.
+  </Accordion>
+
+  <Accordion title="PyTorch 2.0 optimized">
+    Uses `torch.compile()` for significant speed improvements. Flash Attention is automatically enabled when available for efficient self-attention computation.
+  </Accordion>
+
+  <Accordion title="Flexible configuration">
+    Override any training parameter via command line arguments or configuration files. Config files in `config/` directory provide tested hyperparameters for different use cases.
+  </Accordion>
+
+  <Accordion title="GPT-2 compatible">
+    Can load OpenAI's GPT-2 checkpoints (124M, 350M, 774M, 1558M parameters) for finetuning or evaluation.
+  </Accordion>
+</AccordionGroup>
+
+## Performance
+
+On a single 8xA100 40GB node, nanoGPT can reproduce GPT-2 (124M parameters) on OpenWebText in approximately 4 days, achieving a validation loss of ~2.85.
+
+For quick experimentation, you can train a character-level model on Shakespeare in just 3 minutes on a single GPU.
+
+## Use cases
+
+nanoGPT is designed for:
+
+- **Researchers** who want to quickly experiment with GPT architectures
+- **Students** learning about transformer language models
+- **Developers** needing to finetune GPT-2 on domain-specific text
+- **Anyone** wanting a hackable, understandable GPT implementation
+
+<Note>
+  nanoGPT prioritizes simplicity over features. If you need production-ready inference, extensive model variants, or comprehensive tooling, consider using libraries like Hugging Face Transformers.
+</Note>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Set up your environment and install dependencies
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Train your first GPT model in minutes
+  </Card>
+</CardGroup>

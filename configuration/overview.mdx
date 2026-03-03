@@ -1,0 +1,176 @@
+---
+title: Configuration overview
+description: Learn how to configure nanoGPT training using the configurator system
+---
+
+## How configuration works
+
+nanoGPT uses a minimalist configuration system built around Python's `globals()`. The configurator allows you to override default training parameters through config files and command-line arguments.
+
+### Configuration hierarchy
+
+Configuration values are applied in this order:
+
+1. **Default values** - Defined in `train.py` (lines 32-75)
+2. **Config file overrides** - Python files in `config/` directory
+3. **Command-line overrides** - Arguments passed with `--key=value` syntax
+
+<Note>
+Later values override earlier ones. Command-line arguments have the highest priority.
+</Note>
+
+## The configurator system
+
+The configurator (defined in `configurator.py`) is a lightweight system that modifies global variables at runtime. It reads command-line arguments and executes config files to override defaults.
+
+### How it works
+
+```python
+exec(open('configurator.py').read())
+```
+
+This line in `train.py:77` runs the configurator, which:
+
+1. Iterates through `sys.argv[1:]` arguments
+2. Identifies config files (no `--` prefix) and executes them
+3. Parses key-value pairs (with `--` prefix) and updates globals
+4. Validates types match the existing global variable types
+
+## Using config files
+
+Config files are Python scripts that override default parameters by setting variables.
+
+### Basic usage
+
+```bash
+python train.py config/train_shakespeare_char.py
+```
+
+The configurator will:
+- Print the contents of the config file
+- Execute it to override defaults
+- Display each override with `Overriding config with...`
+
+### Example config file
+
+```python config/train_shakespeare_char.py
+# Train a small character-level model
+out_dir = 'out-shakespeare-char'
+eval_interval = 250
+
+dataset = 'shakespeare_char'
+batch_size = 64
+block_size = 256
+
+# Baby GPT model
+n_layer = 6
+n_head = 6
+n_embd = 384
+dropout = 0.2
+
+learning_rate = 1e-3
+max_iters = 5000
+```
+
+<Tip>
+Config files are regular Python scripts. You can import modules, use conditionals, and compute values dynamically.
+</Tip>
+
+## Command-line overrides
+
+You can override individual parameters without creating a config file.
+
+### Syntax
+
+```bash
+python train.py --batch_size=32 --compile=False
+```
+
+### Type validation
+
+The configurator enforces type safety:
+
+```python
+assert type(attempt) == type(globals()[key])
+```
+
+If you try to set `batch_size="hello"`, it will fail because the default is an `int`.
+
+### Value parsing
+
+The configurator uses `ast.literal_eval()` to parse values:
+
+- Numbers: `--batch_size=32` → `32` (int)
+- Booleans: `--compile=False` → `False` (bool)
+- Strings: `--device=cuda` → `"cuda"` (str)
+- Floats: `--learning_rate=1e-3` → `0.001` (float)
+
+<Warning>
+If a key doesn't exist in the default config, you'll get:
+```
+ValueError: Unknown config key: <key>
+```
+</Warning>
+
+## Combining approaches
+
+You can combine config files and command-line arguments:
+
+```bash
+python train.py config/train_gpt2.py --batch_size=16 --wandb_log=True
+```
+
+This will:
+1. Load defaults from `train.py`
+2. Apply overrides from `config/train_gpt2.py`
+3. Override `batch_size` to `16`
+4. Override `wandb_log` to `True`
+
+## Config file examples
+
+The `config/` directory contains several example configurations:
+
+<Accordion title="Training configs">
+- `train_shakespeare_char.py` - Small character-level model (6 layers, 384 dim)
+- `train_gpt2.py` - GPT-2 124M on 8x A100 GPUs
+- `finetune_shakespeare.py` - Finetune GPT-2 XL on Shakespeare
+</Accordion>
+
+<Accordion title="Evaluation configs">
+- `eval_gpt2.py` - Evaluate GPT-2 base model
+- `eval_gpt2_medium.py` - Evaluate GPT-2 medium (350M)
+- `eval_gpt2_large.py` - Evaluate GPT-2 large (774M)
+- `eval_gpt2_xl.py` - Evaluate GPT-2 XL (1.5B)
+</Accordion>
+
+## Configuration best practices
+
+<CardGroup cols={2}>
+  <Card title="Use config files" icon="file-code">
+    For experiments with multiple parameter changes, create a dedicated config file instead of long command lines.
+  </Card>
+  
+  <Card title="Name descriptively" icon="tag">
+    Use descriptive names like `train_small_char.py` or `finetune_gpt2_shakespeare.py`.
+  </Card>
+  
+  <Card title="Document settings" icon="comment">
+    Add comments explaining why you chose specific values, especially for hyperparameters.
+  </Card>
+  
+  <Card title="Version control" icon="code-branch">
+    Commit config files to track your experiments and reproduce results.
+  </Card>
+</CardGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Training parameters" href="/configuration/training-params" icon="sliders">
+    Explore all available training configuration options
+  </Card>
+  
+  <Card title="Model parameters" href="/configuration/model-params" icon="brain">
+    Learn about model architecture configuration
+  </Card>
+</CardGroup>

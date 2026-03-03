@@ -1,0 +1,190 @@
+---
+title: Sampling
+description: Generate text from trained nanoGPT models using the sampling script
+---
+
+The `sample.py` script allows you to generate text from either pre-trained GPT-2 models or from models you've trained yourself. It supports various configuration options for controlling the sampling process.
+
+## Basic usage
+
+Generate samples from a trained model by pointing to the output directory:
+
+```bash
+python sample.py --out_dir=out-shakespeare-char
+```
+
+This will generate text using the default parameters and print the results to the console.
+
+## Sample from pre-trained GPT-2 models
+
+You can sample from any of OpenAI's pre-trained GPT-2 models:
+
+```bash
+python sample.py \
+    --init_from=gpt2-xl \
+    --start="What is the answer to life, the universe, and everything?" \
+    --num_samples=5 --max_new_tokens=100
+```
+
+Available GPT-2 variants:
+- `gpt2` (124M parameters)
+- `gpt2-medium` (350M parameters)
+- `gpt2-large` (774M parameters)
+- `gpt2-xl` (1558M parameters)
+
+## Input prompts
+
+### Text prompt
+
+Provide a starting prompt directly:
+
+```bash
+python sample.py --start="ANGELO:" --out_dir=out-shakespeare-char
+```
+
+### File-based prompt
+
+Load the prompt from a text file:
+
+```bash
+python sample.py --start=FILE:prompt.txt
+```
+
+The script will read the contents of `prompt.txt` and use it as the starting prompt.
+
+## Model initialization
+
+<ParamField path="init_from" type="string" default="resume">
+  Model initialization method:
+  - `resume` - Load from a checkpoint in `out_dir`
+  - `gpt2`, `gpt2-medium`, `gpt2-large`, `gpt2-xl` - Load a pre-trained GPT-2 model
+</ParamField>
+
+<ParamField path="out_dir" type="string" default="out">
+  Directory containing the model checkpoint (`ckpt.pt`). Only used when `init_from='resume'`.
+</ParamField>
+
+## Example outputs
+
+### Character-level Shakespeare model
+
+After training on Shakespeare for ~3 minutes on a GPU:
+
+```
+ANGELO:
+And cowards it be strawn to my bed,
+And thrust the gates of my threats,
+Because he that ale away, and hang'd
+An one with him.
+
+DUKE VINCENTIO:
+I thank your eyes against it.
+
+DUKE VINCENTIO:
+Then will answer him to save the malm:
+And what have you tyrannous shall do this?
+
+DUKE VINCENTIO:
+If you have done evils of all disposition
+To end his power, the day of thrust for a common men
+That I leave, to fight with over-liking
+Hasting in a roseman.
+```
+
+### CPU-trained Shakespeare model
+
+With a smaller model trained on CPU for ~3 minutes:
+
+```
+GLEORKEN VINGHARD III:
+Whell's the couse, the came light gacks,
+And the for mought you in Aut fries the not high shee
+bot thou the sought bechive in that to doth groan you,
+No relving thee post mose the wear
+```
+
+### Fine-tuned GPT-2 on Shakespeare
+
+After fine-tuning a pre-trained GPT-2 model:
+
+```
+THEODORE:
+Thou shalt sell me to the highest bidder: if I die,
+I sell thee to the first; if I go mad,
+I sell thee to the second; if I
+lie, I sell thee to the third; if I slay,
+I sell thee to the fourth: so buy or sell,
+I tell thee again, thou shalt not sell my
+possession.
+
+JULIET:
+And if thou steal, thou shalt not sell thyself.
+
+THEODORE:
+I do not steal; I sell the stolen goods.
+
+THEODORE:
+Thou know'st not what thou sell'st; thou, a woman,
+Thou art ever a victim, a thing of no worth:
+Thou hast no right, no right, but to be sold.
+```
+
+<Note>
+  The quality and style of generated text depends heavily on the training data, model size, training duration, and generation parameters.
+</Note>
+
+## Hardware configuration
+
+<ParamField path="device" type="string" default="cuda">
+  Device to run inference on. Options:
+  - `cuda` - Use the default GPU
+  - `cuda:0`, `cuda:1`, etc. - Use a specific GPU
+  - `cpu` - Use CPU
+  - `mps` - Use Apple Silicon GPU (Metal Performance Shaders)
+</ParamField>
+
+<ParamField path="dtype" type="string" default="auto">
+  Data type for model weights:
+  - `float32` - Full precision
+  - `float16` - Half precision
+  - `bfloat16` - Brain floating point (if supported)
+  
+  Default behavior: Uses `bfloat16` if CUDA is available and supports it, otherwise `float16`.
+</ParamField>
+
+<ParamField path="compile" type="boolean" default="false">
+  Enable PyTorch 2.0 compilation for faster inference. Requires PyTorch 2.0 or later.
+</ParamField>
+
+## Performance optimization
+
+### Using PyTorch 2.0 compile
+
+Enable model compilation for faster generation:
+
+```bash
+python sample.py --compile=True --out_dir=out-shakespeare-char
+```
+
+### GPU acceleration
+
+For Apple Silicon Macs with recent PyTorch versions:
+
+```bash
+python sample.py --device=mps --out_dir=out-shakespeare-char
+```
+
+This uses the on-chip GPU and can significantly accelerate sampling (2-3X speedup).
+
+### Mixed precision
+
+The script automatically selects the best precision format for your hardware. It enables TF32 acceleration on supported GPUs:
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+```
+
+<Note>
+  On CPU, use `--device=cpu --compile=False` to avoid compilation overhead.
+</Note>

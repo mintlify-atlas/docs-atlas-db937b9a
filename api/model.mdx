@@ -1,0 +1,269 @@
+---
+title: Model
+description: GPT model class and configuration
+---
+
+## GPT class
+
+The main GPT Language Model implementation. This class provides the complete transformer architecture with support for training, inference, and text generation.
+
+### Constructor
+
+```python
+GPT(config)
+```
+
+Initializes a new GPT model instance.
+
+<ParamField path="config" type="GPTConfig" required>
+  Configuration object specifying model architecture parameters
+</ParamField>
+
+### Attributes
+
+<ResponseField name="config" type="GPTConfig">
+  The configuration object containing model hyperparameters
+</ResponseField>
+
+<ResponseField name="transformer" type="nn.ModuleDict">
+  Container with the following components:
+  - `wte`: Token embedding layer (vocab_size x n_embd)
+  - `wpe`: Position embedding layer (block_size x n_embd)
+  - `drop`: Dropout layer
+  - `h`: ModuleList of transformer blocks
+  - `ln_f`: Final layer normalization
+</ResponseField>
+
+<ResponseField name="lm_head" type="nn.Linear">
+  Language model head that projects embeddings to vocabulary logits (n_embd x vocab_size, without bias)
+</ResponseField>
+
+### Methods
+
+#### forward
+
+```python
+forward(idx, targets=None)
+```
+
+Performs a forward pass through the model.
+
+<ParamField path="idx" type="torch.LongTensor" required>
+  Input token indices of shape (batch_size, sequence_length)
+</ParamField>
+
+<ParamField path="targets" type="torch.LongTensor">
+  Target token indices for computing loss. If provided, loss will be calculated using cross-entropy.
+</ParamField>
+
+**Returns:** Tuple of (logits, loss)
+- `logits`: Predicted logits of shape (batch_size, sequence_length, vocab_size) during training, or (batch_size, 1, vocab_size) during inference
+- `loss`: Cross-entropy loss if targets are provided, otherwise None
+
+<Expandable title="Implementation details">
+  During training with targets, logits are computed for all positions. During inference without targets, only the final position logits are computed for efficiency.
+
+  The forward pass:
+  1. Creates token embeddings from input indices
+  2. Adds positional embeddings
+  3. Applies dropout
+  4. Passes through transformer blocks
+  5. Applies final layer normalization
+  6. Projects to vocabulary space via language model head
+</Expandable>
+
+#### generate
+
+```python
+@torch.no_grad()
+generate(idx, max_new_tokens, temperature=1.0, top_k=None)
+```
+
+Generates new tokens autoregressively from a conditioning sequence.
+
+<ParamField path="idx" type="torch.LongTensor" required>
+  Conditioning sequence of token indices with shape (batch_size, sequence_length)
+</ParamField>
+
+<ParamField path="max_new_tokens" type="int" required>
+  Number of new tokens to generate
+</ParamField>
+
+<ParamField path="temperature" type="float" default="1.0">
+  Sampling temperature. Values < 1.0 make the model more confident (less random), values > 1.0 make it more diverse (more random).
+</ParamField>
+
+<ParamField path="top_k" type="int">
+  If specified, only the top_k most likely tokens are considered for sampling. Others are set to zero probability.
+</ParamField>
+
+**Returns:** torch.LongTensor of shape (batch_size, sequence_length + max_new_tokens) with generated tokens appended
+
+<Note>
+  Make sure the model is in eval mode (`model.eval()`) before calling this method for generation.
+</Note>
+
+#### from_pretrained
+
+```python
+@classmethod
+from_pretrained(cls, model_type, override_args=None)
+```
+
+Loads a pretrained GPT-2 model from OpenAI/HuggingFace.
+
+<ParamField path="model_type" type="str" required>
+  One of: `'gpt2'` (124M), `'gpt2-medium'` (350M), `'gpt2-large'` (774M), or `'gpt2-xl'` (1558M)
+</ParamField>
+
+<ParamField path="override_args" type="dict">
+  Optional arguments to override. Currently only `dropout` can be overridden.
+</ParamField>
+
+**Returns:** GPT model instance with loaded pretrained weights
+
+<Expandable title="Model configurations">
+  | Model Type | Layers | Heads | Embedding Dim | Parameters |
+  |-----------|--------|-------|---------------|------------|
+  | gpt2 | 12 | 12 | 768 | 124M |
+  | gpt2-medium | 24 | 16 | 1024 | 350M |
+  | gpt2-large | 36 | 20 | 1280 | 774M |
+  | gpt2-xl | 48 | 25 | 1600 | 1558M |
+
+  All pretrained models use:
+  - vocab_size: 50257
+  - block_size: 1024
+  - bias: True
+</Expandable>
+
+#### crop_block_size
+
+```python
+crop_block_size(block_size)
+```
+
+Reduces the model's context length via model surgery.
+
+<ParamField path="block_size" type="int" required>
+  New block size (must be ≤ current block_size)
+</ParamField>
+
+<Warning>
+  This method modifies the model in-place by truncating position embeddings and attention bias matrices. Use this when you want to reduce context length, for example when loading GPT-2 (block size 1024) but using a smaller context window.
+</Warning>
+
+#### get_num_params
+
+```python
+get_num_params(non_embedding=True)
+```
+
+Counts the total number of parameters in the model.
+
+<ParamField path="non_embedding" type="bool" default="True">
+  If True, excludes position embeddings from the count (recommended for fair comparison since they're not used in the final layer)
+</ParamField>
+
+**Returns:** int - Total number of parameters
+
+#### configure_optimizers
+
+```python
+configure_optimizers(weight_decay, learning_rate, betas, device_type)
+```
+
+Creates an AdamW optimizer with weight decay applied only to certain parameters.
+
+<ParamField path="weight_decay" type="float" required>
+  Weight decay coefficient (typically 0.1)
+</ParamField>
+
+<ParamField path="learning_rate" type="float" required>
+  Learning rate for the optimizer
+</ParamField>
+
+<ParamField path="betas" type="tuple" required>
+  Beta coefficients for AdamW (typically (0.9, 0.95))
+</ParamField>
+
+<ParamField path="device_type" type="str" required>
+  Device type ('cuda' or 'cpu') - used to determine if fused AdamW is available
+</ParamField>
+
+**Returns:** torch.optim.AdamW optimizer
+
+<Expandable title="Parameter grouping strategy">
+  The method intelligently groups parameters:
+  - **With weight decay**: All 2D+ parameters (weight tensors in matrix multiplications and embeddings)
+  - **Without weight decay**: All 1D parameters (biases and layer normalization parameters)
+
+  This follows best practices from the original GPT papers.
+</Expandable>
+
+#### estimate_mfu
+
+```python
+estimate_mfu(fwdbwd_per_iter, dt)
+```
+
+Estimates Model FLOPs Utilization (MFU) in units of A100 bfloat16 peak FLOPS.
+
+<ParamField path="fwdbwd_per_iter" type="int" required>
+  Number of forward-backward passes per iteration (typically batch_size * gradient_accumulation_steps)
+</ParamField>
+
+<ParamField path="dt" type="float" required>
+  Time delta in seconds for the iteration
+</ParamField>
+
+**Returns:** float - MFU as a ratio (0.0 to 1.0+) where 1.0 represents 100% of A100 peak performance
+
+<Info>
+  MFU calculation is based on the PaLM paper (Appendix B). A100 bfloat16 peak FLOPS is assumed to be 312 TFLOPS.
+</Info>
+
+---
+
+## GPTConfig
+
+Dataclass containing model architecture configuration.
+
+```python
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True
+```
+
+<ParamField path="block_size" type="int" default="1024">
+  Maximum sequence length / context window size
+</ParamField>
+
+<ParamField path="vocab_size" type="int" default="50304">
+  Vocabulary size. Default is GPT-2's 50257 rounded up to nearest multiple of 64 for efficiency.
+</ParamField>
+
+<ParamField path="n_layer" type="int" default="12">
+  Number of transformer blocks
+</ParamField>
+
+<ParamField path="n_head" type="int" default="12">
+  Number of attention heads
+</ParamField>
+
+<ParamField path="n_embd" type="int" default="768">
+  Embedding dimension size
+</ParamField>
+
+<ParamField path="dropout" type="float" default="0.0">
+  Dropout probability. Use 0.0 for pretraining, try 0.1+ for finetuning.
+</ParamField>
+
+<ParamField path="bias" type="bool" default="True">
+  Whether to use bias in Linear and LayerNorm layers. True matches GPT-2, False is slightly better and faster.
+</ParamField>

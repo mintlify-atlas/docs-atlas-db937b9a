@@ -170,7 +170,7 @@ python sample.py --out_dir=out-shakespeare-char --device=cpu
 
 With the GPU-trained model (validation loss 1.47), you might see:
 
-```
+```text
 ANGELO:
 And cowards it be strawn to my bed,
 And thrust the gates of my threats,
@@ -257,19 +257,19 @@ while True:
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Finetune GPT-2" icon="wrench">
+  <Card title="Finetune GPT-2" icon="wrench" href="/training/finetuning">
     Learn how to finetune pretrained GPT-2 models on your own data for better results
   </Card>
   
-  <Card title="Training configuration" icon="sliders">
+  <Card title="Training configuration" icon="sliders" href="/configuration/overview">
     Explore all available hyperparameters and configuration options
   </Card>
   
-  <Card title="Data preparation" icon="database">
-    Prepare your own datasets for training custom models
+  <Card title="Character-level training" icon="font" href="/training/character-level">
+    Deep dive into character-level model training and configuration
   </Card>
   
-  <Card title="Distributed training" icon="server">
+  <Card title="Distributed training" icon="server" href="/training/distributed-training">
     Scale up to multi-GPU training with PyTorch DDP
   </Card>
 </CardGroup>
